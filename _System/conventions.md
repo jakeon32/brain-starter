@@ -38,7 +38,7 @@ updated: YYYY-MM-DD
 | `moc` | A `_index.md` file (Map of Contents) |
 | `note` | Most ordinary notes |
 | `spec` | Specifications and contracts (`_System/*`) |
-| `plan` | Planning docs (`docs/plans/*`) |
+| `plan` | Planning documents |
 | `runbook` | Step-by-step operational procedures |
 
 ### `status:` values
@@ -51,7 +51,7 @@ updated: YYYY-MM-DD
 
 ### Optional fields — `Knowledge/` and `Memory/` only (2026-07-13)
 
-Everything below is **optional**. None of the ~380 existing `Knowledge/`+`Memory/` files need retrofitting — add these only when they're actually useful for the file at hand. Adopted from auditing a team-scale sibling system with the same raw→refined promotion pattern; full rationale in [`docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md`](../docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md).
+Everything below is **optional**. None of the ~380 existing `Knowledge/`+`Memory/` files need retrofitting — add these only when they're actually useful for the file at hand. Adopted from auditing a team-scale sibling system with the same raw→refined promotion pattern.
 
 ```yaml
 scope: shared                    # opt-in — see below
@@ -96,7 +96,7 @@ ISO format only: `YYYY-MM-DD` (e.g. `2026-05-15`). Never `2026/05/15` or `May 15
 ## Wiki links
 
 - Use `[[file-name]]` for cross-vault references inside the brain
-- Use Markdown links `[text](path/to/file.md)` for links into `docs/` or for displaying custom text
+- Use Markdown links `[text](path/to/file.md)` when you want custom link text
 - Avoid linking from brain to your other notes vault — they are independent vaults
 
 ## Required behaviors when writing a new file

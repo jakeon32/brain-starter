@@ -42,7 +42,3 @@ Curate THIS file (the rules). Everything downstream — clustering, merging,
 self-checking, splitting, archiving — is automatic. To change a rule, edit this
 doc and the matching `INGEST_SCHEMA` / `build_ingest_prompt` in
 `~/.claude/hooks/brain-consolidate.py`.
-
-## Design
-
-See [`../docs/plans/2026-06-04-llm-wiki-convergence-design.md`](../docs/plans/2026-06-04-llm-wiki-convergence-design.md).

@@ -63,4 +63,4 @@ second (stale singles archive out of the search view). Contract:
 
 ## Related
 
-[`search.md`](search.md) · [`decay.md`](decay.md) · [`consolidation-quality.md`](consolidation-quality.md) · [`stop-hook.md`](stop-hook.md) · design [`docs/plans/2026-06-04-llm-wiki-convergence-design.md`](../docs/plans/2026-06-04-llm-wiki-convergence-design.md).
+[`search.md`](search.md) · [`decay.md`](decay.md) · [`consolidation-quality.md`](consolidation-quality.md) · [`stop-hook.md`](stop-hook.md).

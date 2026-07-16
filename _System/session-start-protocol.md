@@ -78,7 +78,7 @@ Returns ranked file paths with snippets. ~12s cold start (per shell), then ~250m
 
 On a freshly-cloned brain, the runtime files (`Memory/profile.md`, etc.) do not exist — only the `_index.md` skeleton. That's expected.
 
-If a pre-existing personal notes vault (from before this system was set up) still has content that hasn't been migrated in, this device hasn't triaged yet. Before proceeding with the user's actual request, suggest running the **one-time triage** ([`triage-protocol.md`](triage-protocol.md)) — it lets the user choose which past content to bring onto this device. After triage, future sessions follow the normal protocol above.
+If a pre-existing personal notes vault (from before this system was set up) still has content that hasn't been migrated in, this device hasn't triaged yet. Before proceeding with the user's actual request, suggest a **one-time triage** — walk the user through choosing which past content to bring onto this device. After triage, future sessions follow the normal protocol above.
 
 If that content is empty or already gone, triage is already done (on this or other devices). Treat any absence in `Memory/` as "this fact wasn't worth bringing to this device" and let the file populate naturally as the conversation reveals new facts.
 

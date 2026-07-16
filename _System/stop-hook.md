@@ -38,8 +38,8 @@ mid-flight ("Hook cancelled"), and the recovery net was silently dropping those
 sessions. See [health.md](health.md) §2026-07-16 sequel.
 
 > This section described a `Stop` hook — with a hard-coded `/Users/<you>/…`
-> path — until 2026-07-16, long after the 07-03 migration. It is the likeliest
-> origin of the `Stop` claim that spread into `docs/plans/01-execution.md`.
+> path — until 2026-07-16, long after the migration to `SessionEnd`. It is the
+> likeliest origin of the stale `Stop` claim that then spread into other docs.
 
 ## What it actually writes (read this carefully)
 
@@ -162,10 +162,8 @@ first once the journal is big enough; **nothing nags about the second**, since
 by construction the watchdog is what would do the nagging.
 
 **Not `Stop`:** the hook event is `SessionEnd`, not `Stop` — Claude Code's
-`Stop` hook does not fire on `/exit` or user interrupt (see
-[`Decisions/2026-05-18-stop-hook-to-sessionend-migration.md`](../Decisions/2026-05-18-stop-hook-to-sessionend-migration.md)).
-An installer version prior to 2026-07-03 patched `Stop`, which a fresh device
-would never have fired — fixed.
+`Stop` hook does not fire on `/exit` or user interrupt. An earlier installer
+version patched `Stop`, which a fresh device would never have fired — fixed.
 
 Re-running is safe (idempotent). Pass `--brain DIR` / `-Brain DIR` to target a
 non-default brain path. On Windows, pass `-Python PATH` (or set

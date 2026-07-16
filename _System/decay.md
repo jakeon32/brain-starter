@@ -7,7 +7,7 @@ updated: 2026-07-12
 
 # brain-decay (forgetting / archive lifecycle)
 
-> 개요(한국어): 저널(Decisions/Mistakes/Patterns)에 망각곡선을 적용하는 주간 스윕. 회상 안 된 저널은 보존율 R이 떨어져 `archived/`로 이동(검색 인덱스 제외 — **삭제 아님**). Knowledge는 semantic 계층이라 감쇠 면제. 근거: MemoryBank(arXiv 2305.10250) 공식 + Zep의 "삭제 대신 무효화" 철학. 로드맵: `docs/plans/2026-07-12-memory-development-roadmap.md`.
+> 개요(한국어): 저널(Decisions/Mistakes/Patterns)에 망각곡선을 적용하는 주간 스윕. 회상 안 된 저널은 보존율 R이 떨어져 `archived/`로 이동(검색 인덱스 제외 — **삭제 아님**). Knowledge는 semantic 계층이라 감쇠 면제. 근거: MemoryBank(arXiv 2305.10250) 공식 + Zep의 "삭제 대신 무효화" 철학.
 
 ## Model
 

@@ -7,7 +7,7 @@ updated: 2026-07-03
 
 # brain — Semantic search index
 
-> **개요 (한국어):** brain 코퍼스에 대한 하이브리드 의미 검색(BM25 + 벡터). 외부 서버·MCP·iii-engine 없이 SQLite 한 파일과 로컬 임베딩 모델로 동작. Markdown은 진실원천 그대로이고 인덱스는 derivable이라 언제든 삭제 후 재빌드 가능. agentmemory 차용 설계 P1 ([docs/research/agentmemory-borrowing-design.md](../docs/research/agentmemory-borrowing-design.md)).
+> **개요 (한국어):** brain 코퍼스에 대한 하이브리드 의미 검색(BM25 + 벡터). 외부 서버·MCP·iii-engine 없이 SQLite 한 파일과 로컬 임베딩 모델로 동작. Markdown은 진실원천 그대로이고 인덱스는 derivable이라 언제든 삭제 후 재빌드 가능. 설계는 agentmemory의 하이브리드 검색 접근을 차용했다.
 
 ## What it is
 
@@ -248,7 +248,7 @@ P1 ship criterion: each of these queries returns the target file in top-3.
 | 4 | LTX-2.3 속도 한계 하드웨어 | `Decisions/2026-05-27-ltx-23-step-speed-is-hardware-limit-not-bug.md` | ✓ top-1 |
 | 5 | MEMORY.md를 라우터로 쓰는 이유 deterministic state | `Decisions/2026-05-18-memory-md-active-projects-as-deterministic-state.md` | ✓ top-1 |
 
-4/5 perfect. Q3 fails on generic Korean ("팔레트") that doesn't appear in body text; works when query uses specific terms from the body. This is the multilingual MiniLM-L12 model's known limitation (KO abstract → KO body bridging is weaker than EN-EN). Mitigation: use BGE-m3 or similar (~2GB) if Q3-like failures become frequent — see [docs/research/agentmemory-borrowing-design.md](../docs/research/agentmemory-borrowing-design.md) §3.4 model upgrade path.
+4/5 perfect. Q3 fails on generic Korean ("팔레트") that doesn't appear in body text; works when query uses specific terms from the body. This is the multilingual MiniLM-L12 model's known limitation (KO abstract → KO body bridging is weaker than EN-EN). Mitigation: use BGE-m3 or similar (~2GB) if Q3-like failures become frequent — swap the model name in `_brain_lib.py`'s `EMBED_MODEL` and full-rebuild the index.
 
 ## Known limitations
 
@@ -264,6 +264,5 @@ Same policy as everything else: each device builds + maintains its own index. In
 
 ## See also
 
-- [docs/research/agentmemory-borrowing-design.md](../docs/research/agentmemory-borrowing-design.md) — design rationale and roadmap (P2/P3/P4)
 - [stop-hook.md](stop-hook.md) — Stop-hook that produces most of the indexed content
 - [session-start-protocol.md](session-start-protocol.md) — current STEP 0A/0B protocol (per-project runbook owns the actual sequence)

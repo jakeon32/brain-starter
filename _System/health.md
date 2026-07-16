@@ -205,10 +205,9 @@ while closing this:
   (standard) → `~/brain` (home-relative fallback, not a device-specific
   absolute path).
 - **Installer patched the wrong hook event**: `install-stop-hook.sh/ps1`
-  still targeted `settings.json`'s `Stop` bucket, but
-  [`Decisions/2026-05-18-stop-hook-to-sessionend-migration.md`](../Decisions/2026-05-18-stop-hook-to-sessionend-migration.md)
-  had already moved the live setup to `SessionEnd` (`Stop` never fires on
-  `/exit` or interrupt). A fresh device running the old installer would have
+  still targeted `settings.json`'s `Stop` bucket, but the live setup had
+  already moved to `SessionEnd` (`Stop` never fires on `/exit` or interrupt).
+  A fresh device running the old installer would have
   installed a hook event that never fires. Fixed — installer now patches
   `SessionEnd` (distill) and `SessionStart` (health), and also generates a
   `brain-health.cmd`/env-wrapped launcher so `-py` gets `CLAUDE_DISTILL_VAULT`
@@ -379,10 +378,8 @@ file is not actually shared" — the frontmatter tag was a statement of intent t
 nothing verified.
 
 **Root cause.** `brain-health.py` pulls at SessionStart. Push was designed to
-happen at SessionEnd
-([2026-07-13 sync design](../docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md)
-§Push: *"SessionEnd, if this session touched any `scope: shared` file — commit +
-push right away"*) — and never wired. `brain-sync.py` had a working `--push` mode
+happen at SessionEnd — *"if this session touched any `scope: shared` file, commit
+and push right away"* — and never wired. `brain-sync.py` had a working `--push` mode
 the whole time; its only caller was the weekly consolidate. So the layer received
 automatically and sent manually, and manual meant "whoever remembers".
 
