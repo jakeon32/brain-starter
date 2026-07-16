@@ -1,0 +1,19 @@
+# Copy this file to tools/denylist.local.txt and fill in your own project's
+# sensitive proper nouns: a company name, a product name, a person's name, a
+# private vault's folder name — anything check-purity.py's public *shape*
+# patterns can't catch because it doesn't name a specific real entity.
+#
+# tools/denylist.local.txt is gitignored, so your private terms never ship —
+# only this .example file (generic placeholders, safe to publish) is tracked.
+#
+# Format: one term per line, case-insensitive substring match, "#" for
+# comments, blank lines ignored. Prefer specific multi-word or compound terms
+# over a single common word or bare first name — a short common word will
+# false-positive on unrelated text (see check-purity.py's own CLEAN test
+# cases for examples of exactly that trap).
+#
+# acme-corp
+# acme's internal wiki
+# ada-lovelace-project
+# example-vault-name
+# secret-codename

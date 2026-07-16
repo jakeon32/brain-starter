@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────
+# Per-device runtime memory — NOT shared across devices.
+#
+# This repo plays two roles:
+#   1) Meta-system definition (docs/, _System/, _index.md, README/CLAUDE.md)
+#      → tracked, push/clone the skeleton across devices
+#   2) Per-device runtime memory (Memory/*, Distilled/*, Knowledge/*, Agents/*)
+#      → ignored, each device fills its own as Claude operates locally
+#
+# Only the _index.md inside each top-level area is tracked, so a fresh
+# clone shows the structure and Claude can self-orient. Everything else
+# under those areas is the device's own brain content.
+# ─────────────────────────────────────────────────────────────
+
+# Memory — per-device runtime
+Memory/**
+!Memory/_index.md
+!Memory/*/
+!Memory/*/_index.md
+
+# Stop-hook output (Decisions, Mistakes, Patterns) + manual Sessions — per-device
+Decisions/**
+!Decisions/_index.md
+Mistakes/**
+!Mistakes/_index.md
+Patterns/**
+!Patterns/_index.md
+Sessions/**
+!Sessions/_index.md
+
+# Knowledge — per-device, except the index
+Knowledge/**
+!Knowledge/_index.md
+!Knowledge/*/
+!Knowledge/*/_index.md
+
+# Agents — per-device, except the index
+Agents/**
+!Agents/_index.md
+
+# _System/audit — per-device weekly/monthly audit results
+_System/audit/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Obsidian temp/runtime
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/plugins/*/data.json
+.obsidian/cache
+.obsidian/app.json
+.obsidian/appearance.json
+.obsidian/graph.json
+
+# Trash
+.trash/
+
+# Nested vault accident prevention (adjust to your own notes vault's folder
+# name if you ever nest it inside this repo by mistake)
+MyVault/
+
+# Conflict files (obsidian-git)
+conflict-files-obsidian-git.md
+
+# Large binaries — consider Git LFS if needed
+*.mp4
+*.zip
+Attachments/*.png
+Attachments/*.jpg
+Attachments/*.gif
+
+# bkit local metadata
+docs/.bkit-memory.json
+docs/.pdca-status.json
+__pycache__/
+*.pyc
+
+# check-purity's local proper-noun wordlist — never ship your own project's
+# real company/person/vault names. tools/denylist.local.txt.example (tracked)
+# shows the format; your real copy stays local.
+tools/*.local.txt

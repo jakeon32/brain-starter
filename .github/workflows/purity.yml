@@ -1,0 +1,21 @@
+name: purity
+
+# A public repo cannot be un-published. This gate runs before anything merges.
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: scanner self-test
+        run: python tools/tests/test_check_purity.py
+      - name: scan repository
+        run: python tools/check-purity.py
+      - name: installer syntax (unix)
+        run: bash -n _System/install-stop-hook.sh

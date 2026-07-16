@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'PY=python3; \"$PY\" -c \"\" >/dev/null 2>&1 || PY=python; exec \"$PY\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-delete.py\"'",
+            "statusMessage": "삭제 명령 검사 중..."
+          }
+        ]
+      }
+    ]
+  }
+}
