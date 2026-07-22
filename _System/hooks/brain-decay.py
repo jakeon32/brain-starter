@@ -187,7 +187,8 @@ def main() -> int:
         if moved:
             subprocess.run(
                 [sys.executable, str(HOOKS_DIR / "brain-reindex.py")],
-                capture_output=True, text=True, encoding="utf-8")
+                capture_output=True, text=True, encoding="utf-8",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),)
         print(f"\naudit: _System/audit/decay-{yr}-W{wk:02d}.md "
               f"/ expiry-queue.md ({len(q)}건)")
     return 0

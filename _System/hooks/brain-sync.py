@@ -3,7 +3,6 @@
 brain-sync: git sync for the opt-in shared layer (Knowledge/*.md + Memory/*.md
 files tagged `scope: shared` in frontmatter).
 
-Design: docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md
 
 Modes:
   --pull   — SessionStart-time. `git pull --ff-only`. Exits 0 (silent) on
@@ -83,10 +82,17 @@ def find_shared_files(root: Path = BRAIN_VAULT) -> list[Path]:
 
 
 def run_git(args: list[str], cwd: Path = BRAIN_VAULT) -> subprocess.CompletedProcess:
+    # creationflags=CREATE_NO_WINDOW: the session hooks now run under pythonw.exe
+    # (no console), so a plain git.exe child would get a NEW console allocated and
+    # flash a window on every call. A single push is add+diff+commit+push (and a
+    # rebase retry on conflict) — that flurry of flashing windows is the "multiple
+    # windows on startup/shutdown" symptom (2026-07-20). One flag here covers all
+    # ~10 run_git call sites. 0 on POSIX, so it's a no-op off Windows.
     return subprocess.run(
         ["git", *args], cwd=str(cwd),
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=120,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 
@@ -171,13 +177,13 @@ def cmd_push(args) -> int:
 def _respawn_detached() -> bool:
     """Re-run this push detached; return True if a child took over.
 
-    Why (health.md §sequel postmortem): `--push` is a SessionEnd hook, and a
-    network `git push` is slow enough to still be in flight when session
-    teardown kills the hook's process tree. That is not hypothetical —
-    it happened the day the hook was wired: a commit landed one second after
-    a SessionEnd fired, and its push never ran. No receipt was written (this
-    script always writes one, pushed yes *or* no), so the process died
-    mid-push. The commit sat local-only, which is the exact failure the
+    Why (2026-07-16, health.md §2026-07-16 sequel): `--push` is a SessionEnd
+    hook, and a network `git push` is slow enough to still be in flight when
+    session teardown kills the hook's process tree. That is not hypothetical —
+    it happened the day the hook was wired: a commit landed at 11:45:03,
+    one second after a SessionEnd fired, and its push never ran. No receipt was
+    written (this script always writes one, pushed yes *or* no), so the process
+    died mid-push. The commit sat local-only, which is the exact failure the
     SessionEnd wiring existed to prevent — the shared layer receiving but not
     sending. The same teardown killed that session's distill.
 

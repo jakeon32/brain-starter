@@ -4,20 +4,19 @@
 # after cloning brain, and again any time _System/hooks/*.py changes). Does:
 #   1. Copies every _System/hooks/*.py -> %USERPROFILE%\.claude\hooks\
 #      (hash-compare, only touches files that actually changed).
-#   2. Generates two launchers with the brain path + interpreter baked in:
-#      - distill-session.cmd (SessionEnd hook)
-#      - brain-health.cmd    (SessionStart hook)
-#      Both pin a python interpreter carrying the ML stack (sqlite_vec,
+#   2. Generates the windowless hook launcher (brain-hook-launch.py) with the
+#      brain path + claude bin baked in, plus brain-watchdog.cmd for schtasks.
+#      The launcher pins a python interpreter carrying the ML stack (sqlite_vec,
 #      sentence-transformers) — bare `python` can resolve to an unrelated
 #      venv per-shell (2026-06-11 postmortem: this exact drift silently broke
 #      distillation for 3+ days). Auto-detects Python 3.10; override with
 #      -Python or $env:BRAIN_PYTHON if your ML-stack interpreter lives elsewhere.
-#   3. Backs up settings.json, then patches BOTH the SessionEnd and
-#      SessionStart hook entries to call the matching launcher.
+#   3. Backs up settings.json, then patches the SessionStart (brain-health) and
+#      SessionEnd (distill-session, brain-sync) entries to EXEC-FORM pythonw.exe
+#      calls through that launcher, so no console window flashes on Windows.
 #
 # Note: the hook event is SessionEnd, not Stop — Claude Code's `Stop` hook does
-# not fire on /exit or user interrupt (see
-# Decisions/2026-05-18-stop-hook-to-sessionend-migration.md). An older version
+# not fire on /exit or user interrupt. An older version
 # of this installer patched "Stop", which a fresh device would never have
 # fired.
 #
@@ -85,11 +84,18 @@ $cmdInfo = Get-Command claude -ErrorAction SilentlyContinue
 if ($null -eq $cmdInfo) { $cmdInfo = Get-Command claude.cmd -ErrorAction SilentlyContinue }
 if ($null -ne $cmdInfo -and $cmdInfo.Source) {
     $ClaudeBin = $cmdInfo.Source
-    # npm shim only: upgrade .cmd shim to the underlying exe if present
-    if ($ClaudeBin -like "*.cmd") {
+    # npm shim only: upgrade the shim to the underlying exe if present.
+    # NOTE (2026-07-18): under PowerShell, `Get-Command claude` resolves to the
+    # .ps1 shim, not .cmd. A .ps1 cannot be exec'd by CreateProcess, so pinning
+    # it made every SessionEnd distill die with OSError 193 ("not a valid Win32
+    # application") for days. Match every npm shim flavour, not just .cmd.
+    if ($ClaudeBin -match '\.(cmd|ps1|bat)$' -or [IO.Path]::GetExtension($ClaudeBin) -eq '') {
         $npmDir = Split-Path -Parent $cmdInfo.Source
         $exe = Join-Path $npmDir "node_modules\@anthropic-ai\claude-code\bin\claude.exe"
         if (Test-Path -LiteralPath $exe) { $ClaudeBin = (Resolve-Path -LiteralPath $exe).Path }
+    }
+    if ($ClaudeBin -match '\.(ps1|bat)$') {
+        Say "WARN: claude bin resolved to a shim that cannot be exec'd ($ClaudeBin) and no claude.exe was found; distillation will fail."
     }
 }
 Say "claude bin : $ClaudeBin"
@@ -125,6 +131,13 @@ function Resolve-BrainPython {
 }
 $PythonBin = Resolve-BrainPython -Override $Python
 Say "python bin : $PythonBin"
+
+# Console-less twin used by the hook/schtasks launchers so SessionEnd/SessionStart
+# and scheduled tasks don't flash a python console window on Windows. pythonw.exe
+# ships next to python.exe in every CPython install; fall back if it's somehow absent.
+$PythonWBin = $PythonBin -replace '(?i)python\.exe$', 'pythonw.exe'
+if (-not (Test-Path -LiteralPath $PythonWBin)) { $PythonWBin = $PythonBin }
+Say "pythonw bin: $PythonWBin"
 
 # Check (not install) the ML stack brain-search/reindex/consolidate need.
 # These run detached with stderr suppressed (brain-health.py's spawn), so a
@@ -170,58 +183,57 @@ foreach ($name in $HookFiles) {
 }
 
 # 3. (re)generate the launchers (brain + interpreter + claude bin baked in)
-$DistillCmd  = Join-Path $HookDir "distill-session.cmd"
-$HealthCmd   = Join-Path $HookDir "brain-health.cmd"
+#
+# Session hooks (SessionStart/SessionEnd) run WINDOWLESS: Claude Code spawns
+# pythonw.exe in EXEC FORM (a settings.json hook with an "args" array) pointing at
+# the shared launcher below. Exec form takes NO shell (no Git Bash/cmd), and
+# pythonw.exe is a GUI-subsystem binary, so nothing flashes a conhost window on
+# Windows. The launcher bakes the per-device env the pipeline scripts read, then
+# runs the requested script in-process (runpy) so its stdin/stdout/exit reach
+# Claude Code exactly as a direct `pythonw.exe <script>` call would.
+#   Superseded the old `cmd //c "*.cmd"` launchers, which flashed a cmd.exe window
+#   on every SessionStart/SessionEnd (2026-07-20). Exec form + args is documented
+#   in Claude Code's hooks reference; matcher/behaviour unchanged.
+$LaunchPy    = Join-Path $HookDir "brain-hook-launch.py"
 $WatchdogCmd = Join-Path $HookDir "brain-watchdog.cmd"
-$SyncCmd     = Join-Path $HookDir "brain-sync-push.cmd"
 
-$distillLauncher = @"
-@echo off
-rem Auto-generated by install-stop-hook.ps1 - do not hand-edit; re-run installer.
-set "CLAUDE_DISTILL_VAULT=$Brain"
-set "CLAUDE_DISTILL_CLAUDE_BIN=$ClaudeBin"
-"$PythonBin" "%~dp0distill-session.py"
+$hookLauncher = @"
+# Auto-generated by install-stop-hook.ps1 - do not hand-edit; re-run installer.
+# Windowless hook launcher (see install-stop-hook.ps1 step 3 for the why).
+# Usage: pythonw.exe brain-hook-launch.py <script.py> [script args...]
+import os, sys, runpy
+os.environ.setdefault("CLAUDE_DISTILL_VAULT", r"$Brain")
+os.environ.setdefault("CLAUDE_DISTILL_CLAUDE_BIN", r"$ClaudeBin")
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)  # so the target's `import _brain_lib` resolves
+if len(sys.argv) < 2:
+    sys.stderr.write("brain-hook-launch.py: missing target script name\n")
+    raise SystemExit(2)
+_target = os.path.join(_here, sys.argv[1])
+sys.argv = [_target] + sys.argv[2:]
+runpy.run_path(_target, run_name="__main__")
 "@
-$healthLauncher = @"
-@echo off
-rem Auto-generated by install-stop-hook.ps1 - do not hand-edit; re-run installer.
-set "CLAUDE_DISTILL_VAULT=$Brain"
-"$PythonBin" "%~dp0brain-health.py"
-"@
-# Watchdog runs from Task Scheduler at logon, not from a session — see step 6.
+
+# Watchdog runs from Task Scheduler at logon, not from a session (see step 6), so
+# it stays a .cmd: schtasks needs an env-setting wrapper and shows no window there.
 $watchdogLauncher = @"
 @echo off
 rem Auto-generated by install-stop-hook.ps1 - do not hand-edit; re-run installer.
 set "CLAUDE_DISTILL_VAULT=$Brain"
-"$PythonBin" "%~dp0brain-watchdog.py"
-"@
-# Pushes the scope:shared layer at SessionEnd. brain-health already pulls at
-# SessionStart, so without this a device only ever receives — see step 5.
-$syncLauncher = @"
-@echo off
-rem Auto-generated by install-stop-hook.ps1 - do not hand-edit; re-run installer.
-set "CLAUDE_DISTILL_VAULT=$Brain"
-"$PythonBin" "%~dp0brain-sync.py" --push
+"$PythonWBin" "%~dp0brain-watchdog.py"
 "@
 
 if ($DryRun) {
-    Say "[dry-run] would write launcher: $DistillCmd"
-    Say $distillLauncher
-    Say "[dry-run] would write launcher: $HealthCmd"
-    Say $healthLauncher
+    Say "[dry-run] would write launcher: $LaunchPy"
+    Say $hookLauncher
     Say "[dry-run] would write launcher: $WatchdogCmd"
     Say $watchdogLauncher
-    Say "[dry-run] would write launcher: $SyncCmd"
-    Say $syncLauncher
 } else {
-    Set-Content -LiteralPath $DistillCmd -Value $distillLauncher -Encoding ASCII
-    Say "launcher written: $DistillCmd"
-    Set-Content -LiteralPath $HealthCmd -Value $healthLauncher -Encoding ASCII
-    Say "launcher written: $HealthCmd"
+    Set-Content -LiteralPath $LaunchPy -Value $hookLauncher -Encoding ASCII
+    Say "launcher written: $LaunchPy"
     Set-Content -LiteralPath $WatchdogCmd -Value $watchdogLauncher -Encoding ASCII
     Say "launcher written: $WatchdogCmd"
-    Set-Content -LiteralPath $SyncCmd -Value $syncLauncher -Encoding ASCII
-    Say "launcher written: $SyncCmd"
 }
 
 # 4. backup settings.json
@@ -235,24 +247,26 @@ if (Test-Path -LiteralPath $Settings) {
 # actual event name Claude Code fires (SessionEnd for distill, SessionStart
 # for health) — NOT "Stop" (see decision note above).
 #
-# The launcher is invoked as `cmd //c` — the doubled slash is required, not a
-# typo. Claude Code runs hook commands through its bundled sh (Git Bash/MSYS)
-# on Windows, whose argument conversion rewrites a lone `/c` into a Windows
-# path (`C:\...`). The switch is then gone, cmd.exe starts interactively,
-# prints its banner, exits 0 — and Claude Code reports "hook success" while the
-# hook never ran. `//c` is the MSYS escape that survives as `/c`.
-# (2026-07-15: this silently disabled distill + health for weeks. See
-# health.md §2026-07-15 postmortem.)
+# Each hook is written in EXEC FORM: {"type":"command","command":"<pythonw>",
+# "args":["<brain-hook-launch.py>","<script.py>",...]}. Claude Code spawns the
+# command directly with that argv and NO shell (per its hooks reference), so on
+# Windows there is no Git Bash/cmd layer to flash a console window, and pythonw.exe
+# (GUI subsystem) shows none either. This replaced the old shell-form
+# `cmd //c "*.cmd"` command, whose cmd.exe wrapper flashed on every session
+# start/end (2026-07-20). Exec form also sidesteps the 2026-07-15 `//c` MSYS
+# quoting trap entirely — no shell means no argument rewriting (see health.md
+# §2026-07-15 postmortem).
 #
-# The launcher path must reach sh quoted, or sh eats its backslashes and cmd.exe
-# gets `C:UsersUSER...`. The quoting is composed in python below, NOT here:
-# Windows PowerShell 5.1 strips embedded double quotes when passing arguments to
-# a native exe, so `"cmd //c `"$HealthCmd`""` silently arrives unquoted.
+# argv to the patcher: settings, hook_type, marker, pythonw, launcher, script, [extra...]
+# It matches an existing entry by `marker` in either the command OR any arg, so
+# re-runs update in place whether the prior entry was shell-form or exec-form.
 $pyPatch = @'
 import json, sys, os
 
-settings_path, hook_type, marker, launcher = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-command = 'cmd //c "%s"' % launcher
+settings_path, hook_type, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+pythonw, launcher, script = sys.argv[4], sys.argv[5], sys.argv[6]
+extra = sys.argv[7:]
+args = [launcher, script] + extra
 
 if os.path.exists(settings_path):
     with open(settings_path, "r", encoding="utf-8") as f:
@@ -274,43 +288,48 @@ if block is None:
 
 inner = block.setdefault("hooks", [])
 
+def matches(h):
+    if not (isinstance(h, dict) and h.get("type") == "command"):
+        return False
+    if marker in str(h.get("command", "")):
+        return True
+    return any(marker in str(a) for a in (h.get("args") or []))
+
 replaced = False
 for h in inner:
-    if isinstance(h, dict) and h.get("type") == "command" \
-       and marker in str(h.get("command", "")):
-        h["command"] = command
+    if matches(h):
+        h["command"] = pythonw
+        h["args"] = args
         replaced = True
 if not replaced:
-    inner.append({"type": "command", "command": command})
+    inner.append({"type": "command", "command": pythonw, "args": args})
 
 with open(settings_path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
 
-print(f"settings.json {hook_type} hook set to:")
-print("  " + command)
+print(f"settings.json {hook_type} hook set to exec-form:")
+print("  " + pythonw + " " + " ".join(args))
 '@
 
 if ($DryRun) {
-    Say "[dry-run] would set settings.json SessionEnd command == cmd //c `"$DistillCmd`""
-    Say "[dry-run] would set settings.json SessionStart command == cmd //c `"$HealthCmd`""
-    Say "[dry-run] would set settings.json SessionEnd command == cmd //c `"$SyncCmd`""
+    Say "[dry-run] SessionStart brain-health   == `"$PythonWBin`" `"$LaunchPy`" brain-health.py"
+    Say "[dry-run] SessionEnd  distill-session == `"$PythonWBin`" `"$LaunchPy`" distill-session.py"
+    Say "[dry-run] SessionEnd  brain-sync      == `"$PythonWBin`" `"$LaunchPy`" brain-sync.py --push"
 } else {
     $tmp = [System.IO.Path]::GetTempFileName()
     Set-Content -LiteralPath $tmp -Value $pyPatch -Encoding UTF8
     try {
-        & $PythonBin $tmp $Settings "SessionEnd" "distill-session" $DistillCmd
+        & $PythonBin $tmp $Settings "SessionEnd" "distill-session" $PythonWBin $LaunchPy "distill-session.py"
         if ($LASTEXITCODE -ne 0) { throw "settings.json SessionEnd patch failed (python exit $LASTEXITCODE)" }
-        & $PythonBin $tmp $Settings "SessionStart" "brain-health" $HealthCmd
+        & $PythonBin $tmp $Settings "SessionStart" "brain-health" $PythonWBin $LaunchPy "brain-health.py"
         if ($LASTEXITCODE -ne 0) { throw "settings.json SessionStart patch failed (python exit $LASTEXITCODE)" }
         # The shared layer syncs both ways or it doesn't sync: brain-health pulls
         # at SessionStart, so without this push a device only ever receives. The
-        # design (docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md
-        # §Push) called for this from the start; it was never wired, and
-        # scope:shared content piled up on this device without ever reaching
-        # any other device -- including notes meant to stop a mistake from
-        # repeating.
-        & $PythonBin $tmp $Settings "SessionEnd" "brain-sync" $SyncCmd
+        # design called for this from the start; it was never wired, and by
+        # 2026-07-16 six of fourteen scope:shared files existed on this device
+        # only — including the one written to stop a rule being broken a 4th time.
+        & $PythonBin $tmp $Settings "SessionEnd" "brain-sync" $PythonWBin $LaunchPy "brain-sync.py" "--push"
         if ($LASTEXITCODE -ne 0) { throw "settings.json SessionEnd sync patch failed (python exit $LASTEXITCODE)" }
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -363,7 +382,7 @@ Say "one-time per device (schtasks cannot be re-run idempotently, so they are"
 Say "left to you rather than silently duplicated):"
 Say ""
 Say "1. weekly consolidate (journal -> Knowledge/ wiki convergence):"
-Say "  schtasks /create /tn brain-consolidate-weekly /sc weekly /d SUN /st 04:00 /tr `"'$PythonBin' '$HookDir\brain-consolidate.py' --auto`""
+Say "  schtasks /create /tn brain-consolidate-weekly /sc weekly /d SUN /st 14:00 /tr `"'$PythonBin' '$HookDir\brain-consolidate.py' --weekly`""
 Say "   brain-health will remind you once the journal has enough files and this"
 Say "   was never run (see _System/consolidate.md)."
 Say ""

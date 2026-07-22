@@ -184,8 +184,8 @@ were never hand-written.
 - **B — `_brain_lib.iter_markdown_files` did not exclude `_catalog.md`.** The
   auto-generated catalogs were indexed (search noise) and became consolidation
   cluster members — `write_page` then tried to `rename` a `_catalog.md` into
-  `archived/`, corrupting the merged note (`brain-vault-runtime-catalog.md`,
-  deleted) and crashing on a name clash with a 6/12 ghost. Fix: exclude
+  `archived/`, corrupting the merged note (which had to be deleted) and
+  crashing on a name clash with an older ghost. Fix: exclude
   `_catalog.md` in `iter_markdown_files`.
 
 **Cleanup:** deleted 3 ghost `archived/2026/_catalog.md` (6/12) + the corrupt
@@ -429,8 +429,8 @@ set(re.findall(r"session ([0-9a-f]{8})", txt))   # "already touched"
 
 and that substring matches the **start** lines too — `distilling session X`,
 `catchup: recovering session X`. So a session whose only trace was "I began" got
-retired as done, forever. `8101f80b` is the clean specimen: one start line, zero
-notes, permanently skipped. **The net dropped exactly the sessions it existed to
+retired as done, forever. The clean specimen looked like this: one start line,
+zero notes, permanently skipped. **The net dropped exactly the sessions it existed to
 catch** — a session that completed normally was never at risk in the first place.
 
 **Why nothing caught it.** The coverage map's row for this is "Stop/SessionEnd
@@ -491,12 +491,11 @@ also slow. It died in exactly the same teardown, on the day it was wired:
 
 ```
 11:45:02.22  SessionEnd fires
-11:45:02     distilling session 56a65e83  -> no outcome, ever      (victim 1)
+11:45:02     a session starts distilling  -> no outcome, ever      (victim 1)
 11:45:03     a commit lands               -> push never ran        (victim 2)
 ```
 
-That commit carried `Knowledge/absolute-layout-verification.md` — a `scope: shared`
-file. **The commit sat local-only for a day**, which is precisely the failure the
+That commit carried a `scope: shared` note under `Knowledge/`. **The commit sat local-only for a day**, which is precisely the failure the
 SessionEnd wiring was added to prevent the day before (§2026-07-16 postmortem,
 "the shared layer only ever received"). The fix received a fix and still only
 half-worked.

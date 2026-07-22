@@ -28,13 +28,13 @@ Checks:
      _catalog.md pointer, never a hand-written file listing (Knowledge/_index.md
      silently regrew 21 hand-written links by 2026-06-24 despite the catalog
      automation; git diff only surfaces it at commit time)
-  7. scope:shared pull (2026-07-13, docs/plans/2026-07-13-refined-layer-
-     cross-device-sync-design.md): one deliberate exception to "read-only" --
+  7. scope:shared pull (2026-07-13): one deliberate exception to "read-only" --
      `git pull --ff-only` for any Knowledge/Memory content tagged scope:
      shared. Bounded by a timeout so a dead network delays session start by
      at most a few seconds, never hangs it. Silent on success/no-op/offline;
      warns only when the fast-forward genuinely can't apply.
 """
+import json
 import os
 import re
 import subprocess
@@ -67,6 +67,10 @@ MEMORY_STALE_DAYS = 60
 # always on trains you to skim past the block that carries the real ones.
 RESUME_MAX_KB = 55
 RESUME_MAX_SECTIONS = 18
+# hot.md는 *직전 세션* 캐시 — 정상 크기는 몇 KB다. 2026-07-18에 160KB(3주치
+# 블록 누적)로 발견됐는데 resume만 검사하고 hot은 검사 항목이 아니어서 조용히
+# 컸다. 같은 append-회귀 병이므로 같은 방식으로 감시한다.
+HOT_MAX_KB = 40
 INDEX_LINK_MAX = 5  # _index.md is prose + a _catalog pointer; more file links = drift
 SYNC_PULL_TIMEOUT_S = 10  # bounds the one non-read-only check; see check_shared_sync
 
@@ -157,8 +161,9 @@ def check_consolidate_receipt(warnings: list) -> None:
         if age_d > CONSOLIDATE_MAX_DAYS:
             warnings.append(
                 f"주간 consolidate 영수증이 {age_d:.0f}일 전 ({receipts[-1].name}) — "
-                f"스케줄(brain-consolidate-weekly, 일요일 04:00, 로그인 시에만 실행)이 "
-                f"미스됐을 수 있음 → 수동: python ~/.claude/hooks/brain-consolidate.py --auto"
+                f"대기열 스케줄 미스 또는 세션 처리가 밀렸을 수 있음 → "
+                f"python ~/.claude/hooks/brain-consolidate.py --queue 후 "
+                f"세션에서 처리 (_System/consolidate.md §Session processing)"
             )
         return
     journal_files = sum(
@@ -167,11 +172,96 @@ def check_consolidate_receipt(warnings: list) -> None:
     )
     if journal_files >= CONSOLIDATE_NEVER_RUN_MIN_FILES:
         warnings.append(
-            f"저널({journal_files}개 파일)이 쌓였는데 consolidate가 한 번도 실행된 적 없음 "
-            f"— 이 기기에 주간 스케줄이 설정 안 됐을 가능성 (install-stop-hook은 이 스케줄을 "
-            f"자동 등록하지 않음) → 수동 1회: python ~/.claude/hooks/brain-consolidate.py --auto "
-            f"/ 반복 설정: _System/consolidate.md §Schedule"
+            f"저널({journal_files}개 파일)이 쌓였는데 consolidate가 한 번도 실행된 적 없음. "
+            + _consolidate_schedule_diagnosis()
+            + " → python ~/.claude/hooks/brain-consolidate.py --queue 후 "
+            "세션에서 처리 (_System/consolidate.md §Session processing)"
         )
+
+
+def check_consolidate_queue(warnings: list) -> None:
+    """통합 대기열(consolidate-queue.json)에 남은 클러스터를 세션에 알린다.
+
+    2026-07-19 구조 전환: 주간 잡은 클러스터링(--queue, LLM 0회)까지만 하고,
+    통합 자체는 세션 안의 claude가 직접 한다 (claude -p 자식 스폰 없음 —
+    한 기기에서 무인 --auto가 자식 프로세스를 폭증시켜 구독 한도를 태운 사건이
+    계기). 조각은 대기열 생성 후 이동/아카이브될 수 있으므로 살아있는 조각이
+    2개 이상인 클러스터만 센다."""
+    q = AUDIT / "consolidate-queue.json"
+    if not q.exists():
+        return
+    try:
+        data = json.loads(q.read_text(encoding="utf-8"))
+    except Exception:
+        warnings.append(f"통합 대기열 파일이 손상됨({q.name}) — "
+                        "python ~/.claude/hooks/brain-consolidate.py --queue 재생성")
+        return
+    alive = []
+    for c in data.get("clusters", []):
+        files = [f for f in c.get("files", []) if (BRAIN / f).exists()]
+        if len(files) >= 2:
+            alive.append(len(files))
+    if alive:
+        warnings.append(
+            f"통합 대기 {len(alive)}클러스터/{sum(alive)}조각 "
+            f"({data.get('generated', '?')} 생성) — 이 세션에서 직접 처리 권장: "
+            f"_System/consolidate.md §Session processing"
+        )
+
+
+def _consolidate_schedule_diagnosis() -> str:
+    """스케줄 상태를 *추정하지 말고 조회*해서 붙인다.
+
+    2026-07-18: 이 경고가 "주간 스케줄이 설정 안 됐을 가능성"이라고 단정조로 출력했는데
+    실제로는 등록돼 있었고, 진짜 원인은 작업 설정(StartWhenAvailable=False +
+    DisallowStartIfOnBatteries=True)이라 노트북이 일요일 새벽에 깨어 있고 전원까지
+    꽂혀 있어야만 도는 상태였다. 틀린 추정을 사실처럼 내면 엉뚱한 데를 파게 된다 —
+    경고 문구가 원인을 지목할 거면 근거를 실제로 확인하고 지목한다.
+    """
+    if os.name != "nt":
+        return "반복 설정 확인: _System/consolidate.md §Schedule"
+    try:
+        xml = subprocess.run(
+            ["schtasks", "/query", "/tn", "brain-consolidate-weekly", "/xml"],
+            capture_output=True, text=True, timeout=10,
+            # under pythonw this console query would otherwise flash a window
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return "스케줄 상태 조회 실패 — 반복 설정: _System/consolidate.md §Schedule"
+    if xml.returncode != 0:
+        return ("이 기기에 주간 스케줄(brain-consolidate-weekly)이 **없음**(조회 확인) "
+                "— 등록법: _System/consolidate.md §Schedule")
+    out = xml.stdout
+    blockers = []
+    if "<StartWhenAvailable>true</StartWhenAvailable>" not in out:
+        blockers.append("StartWhenAvailable=False(예약 시각에 꺼져 있으면 소급 실행 안 함)")
+    if "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" not in out:
+        blockers.append("DisallowStartIfOnBatteries=True(배터리면 실행 안 함)")
+    if blockers:
+        return ("스케줄은 등록돼 있으나 설정이 실행을 막는다: " + " / ".join(blockers)
+                + " — 둘 다 해제해야 실제로 돈다")
+    return "스케줄은 등록·설정 정상 — 다음 실행 시각까지 기다리면 된다"
+
+
+# 끝난 일의 *기록*은 오래된 게 정상이다 — 갱신 대상이 아니라서 경고에 뜨면 오탐이다.
+# (2026-07-18: 끝난 마이그레이션 로그나 1회성 셋업 가이드 같은 문서가 매 세션 경고에 실려
+#  나왔다. 상시 오탐은 health 출력 자체를 건너뛰게 만들고, 그러면 진짜 경고를 놓친다
+#  — 같은 날 distill이 몇 주간 무증상으로 죽어 있던 사고와 같은 계열의 위험.)
+STALENESS_EXEMPT_STATUS = {"confirmed", "deployed", "done", "archived", "retired"}
+_FM_STATUS_RE = re.compile(r"(?m)^status:\s*['\"]?([a-z-]+)", re.I)
+_FM_EXEMPT_RE = re.compile(r"(?m)^staleness:\s*exempt\b", re.I)
+
+
+def _staleness_exempt(path) -> bool:
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:800]
+    except Exception:
+        return False
+    if _FM_EXEMPT_RE.search(head):        # 명시 옵트아웃
+        return True
+    m = _FM_STATUS_RE.search(head)
+    return bool(m and m.group(1).lower() in STALENESS_EXEMPT_STATUS)
 
 
 def check_memory_staleness(warnings: list) -> None:
@@ -180,7 +270,8 @@ def check_memory_staleness(warnings: list) -> None:
         return
     cutoff = datetime.now().timestamp() - MEMORY_STALE_DAYS * 86400
     stale = [f.name for f in mem.glob("*.md")
-             if f.name != "_index.md" and f.stat().st_mtime < cutoff]
+             if f.name != "_index.md" and f.stat().st_mtime < cutoff
+             and not _staleness_exempt(f)]
     if stale:
         shown = ", ".join(sorted(stale)[:5])
         more = f" 외 {len(stale)-5}개" if len(stale) > 5 else ""
@@ -232,6 +323,21 @@ def check_resume_bloat(warnings: list) -> None:
     )
 
 
+def check_hot_bloat(warnings: list) -> None:
+    """hot.md가 캐시 크기를 넘으면 경고. 세션랩이 새 블록을 얹기만 하고 지난
+    블록을 안 내리면 커진다 — resume와 동일한 회귀."""
+    hot = BRAIN / "Memory" / "hot.md"
+    if not hot.exists():
+        return
+    size_kb = hot.stat().st_size / 1024
+    if size_kb > HOT_MAX_KB:
+        warnings.append(
+            f"hot.md 비대화: {size_kb:.0f}KB (한계 {HOT_MAX_KB}KB) — hot은 직전 세션 "
+            f"캐시다. 새 블록을 얹을 때 지난 세션 블록을 Sessions/archived/로 내릴 것 "
+            f"(살릴 것은 미결·이월 항목뿐)"
+        )
+
+
 # List-item link to a sibling .md, e.g. "- [title](slug.md) — desc". A burst of
 # these in a tracked _index.md means a hand-written listing crept back in.
 _INDEX_LINK_RE = re.compile(r"^\s*[-*+]\s*\[[^\]]+\]\(([^)]+\.md)\)")
@@ -275,8 +381,7 @@ def check_index_drift(warnings: list) -> None:
 
 def check_shared_sync(warnings: list) -> None:
     """git pull --ff-only for scope:shared Knowledge/Memory content. The one
-    check here that isn't purely read-only (docs/plans/2026-07-13-refined-
-    layer-cross-device-sync-design.md) -- bounded by SYNC_PULL_TIMEOUT_S so a
+    check here that isn't purely read-only -- bounded by SYNC_PULL_TIMEOUT_S so a
     dead network can't hang session start, only delay it briefly. Silent on
     success/no-op/offline (brain-sync.py itself already tells those apart);
     only a genuine divergence surfaces here."""
@@ -288,6 +393,7 @@ def check_shared_sync(warnings: list) -> None:
             [sys.executable, str(sync), "--pull"],
             capture_output=True, text=True, encoding="utf-8",
             timeout=SYNC_PULL_TIMEOUT_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception:
         return  # timeout or any other failure -- treat like offline, stay silent
@@ -344,8 +450,10 @@ def main() -> None:
     check_distill_failures(warnings)
     check_index_staleness(warnings)
     check_consolidate_receipt(warnings)
+    check_consolidate_queue(warnings)
     check_memory_staleness(warnings)
     check_resume_bloat(warnings)
+    check_hot_bloat(warnings)
     check_index_drift(warnings)
     check_shared_sync(warnings)
     spawn_background_maintenance()

@@ -8,8 +8,7 @@ else -- edits, git mv/archive moves, and deletes outside those two folders
 -- passes through untouched.
 
 Why only these two folders: files tagged scope: shared in Knowledge/Memory
-now propagate across devices via git push/pull (see
-docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md). A bad
+can propagate across devices via git push/pull. A bad
 delete here doesn't just lose local data -- it can silently disappear
 everywhere on the next pull. Journals (Decisions/Mistakes/Patterns/
 Sessions) and everything outside brain stay unrestricted.

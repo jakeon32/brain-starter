@@ -222,6 +222,7 @@ $t = New-Object Windows.UI.Notifications.ToastNotification $x
         p = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return p.returncode == 0
     except Exception:

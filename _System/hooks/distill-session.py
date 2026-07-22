@@ -27,6 +27,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 # ---- Config ----------------------------------------------------------------
+# Keep this fallback identical to distill-catchup.py's DEFAULT_VAULT. An earlier
+# fallback here named a path that no longer existed, so any time the env var was
+# missing the distiller wrote into a dead vault and nothing surfaced the loss.
 VAULT_ROOT = Path(os.environ.get(
     "CLAUDE_DISTILL_VAULT",
     str(Path.home() / "brain"),
@@ -35,6 +38,35 @@ LOG_PATH = Path(os.environ.get(
     "CLAUDE_DISTILL_LOG",
     str(Path.home() / ".claude" / "logs" / "distill.log"),
 ))
+def _upgrade_shim(path: str) -> str | None:
+    """Map an npm shim to the native claude.exe beside it; drop it if unusable.
+
+    Windows-only hazard (2026-07-18 postmortem): npm installs four entry points
+    next to each other -- `claude` (sh), `claude.cmd`, `claude.ps1`, and the real
+    `claude.exe` under node_modules. Only the .exe survives our call pattern:
+      - .ps1 / extensionless  -> CreateProcess raises OSError 193 outright.
+      - .cmd                  -> runs, but dies with rc=1 "the system cannot find
+                                 the file specified" once stdin is a pipe, which
+                                 is exactly how the transcript prompt is fed.
+    Both failure modes were live simultaneously (SessionEnd pinned the .ps1,
+    catchup resolved the .cmd), silently killing every distill for days. Return
+    None when a shim cannot be rescued so the caller keeps searching rather than
+    committing to a path that is guaranteed to fail at call time.
+    """
+    if os.name != "nt":
+        return path
+    ext = Path(path).suffix.lower()
+    if ext == ".exe":
+        return path
+    if ext not in (".cmd", ".bat", ".ps1", ""):
+        return path
+    exe = Path(path).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    if exe.exists():
+        return str(exe)
+    # A bare name (no separator) is left to PATH resolution at exec time.
+    return None if os.sep in path else path
+
+
 def _resolve_claude_bin() -> str:
     """Resolve the claude binary defensively. A pinned absolute path can go
     stale when the CLI is reinstalled (the npm->native migration moved it once
@@ -42,10 +74,14 @@ def _resolve_claude_bin() -> str:
     known install locations, so the pipeline survives the next move too."""
     pinned = os.environ.get("CLAUDE_DISTILL_CLAUDE_BIN")
     if pinned and (os.sep not in pinned or Path(pinned).exists()):
-        return pinned
+        upgraded = _upgrade_shim(pinned)
+        if upgraded:
+            return upgraded
     found = shutil.which("claude") or shutil.which("claude.cmd")
     if found:
-        return found
+        upgraded = _upgrade_shim(found)
+        if upgraded:
+            return upgraded
     candidates = [
         Path.home() / ".local" / "bin" / "claude.exe",
         Path.home() / ".local" / "bin" / "claude",
@@ -251,6 +287,9 @@ def call_claude_distill(prompt: str) -> dict | None:
         "--effort", "low",
         "--disable-slash-commands",
         "--no-session-persistence",
+        # MCP·채널 플러그인 부팅 차단: Discord 플러그인이 부팅되면 distill 1회당
+        # 봇 게이트웨이 세션 1회 소모 (24h 1000회 한도 누수, 2026-07-19).
+        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
     ]
     # Prompt goes via stdin, NOT argv. On Windows the claude.cmd shim runs
     # through cmd.exe, whose command line is capped at ~8191 chars; a full
@@ -270,6 +309,9 @@ def call_claude_distill(prompt: str) -> dict | None:
             timeout=TIMEOUT_SEC,
             check=False,
             env=env,
+            # CREATE_NO_WINDOW: Windows에서 자식 claude마다 콘솔 창이 뜨는 것 차단
+            # (POSIX엔 속성이 없어 0 = 무동작). 2026-07-19 brain-consolidate.py와 동일 패턴.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         log(f"claude CLI timeout after {TIMEOUT_SEC}s")

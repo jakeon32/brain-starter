@@ -40,7 +40,7 @@ Stop after step 1 if the user's request has nothing to do with their personal co
 
 ## Resume procedure ("이어서 하자" — added 2026-06-12)
 
-> 한국어 요약: 재개 발화 시 확인 3단계 — resume 섹션 실제 Read → 최신성 교차검증 → 재개 선언 후 시작. 진입점 1번 고정, 임의 트랙 선택 금지. 정본: `Knowledge/recording-protocol.md` §세션 연속성.
+> 한국어 요약: 재개 발화 시 확인 3단계 — resume 섹션 실제 Read → 최신성 교차검증 → 재개 선언 후 시작. 진입점 1번 고정, 임의 트랙 선택 금지. 정본은 기록 규칙을 모아둔 런타임 문서 하나다.
 
 When the user says "continue from last session" (이어서 하자 / 지난 세션에 이어서 / 계속하자 / 어디까지 했지), three steps are **mandatory before any work**:
 
@@ -90,6 +90,6 @@ If that content is empty or already gone, triage is already done (on this or oth
 
 ## Write rules at session end
 
-If a Stop-hook is installed, it handles the journal layer (`Decisions/Mistakes/Patterns`). Updating `Memory/session-resume.md` is **not optional**: on session wrap, overwrite the current project's section (one section per project; displace the old one to `Sessions/` if it has log value). Canonical rules: `Knowledge/recording-protocol.md` §세션 연속성.
+If a Stop-hook is installed, it handles the journal layer (`Decisions/Mistakes/Patterns`). Updating `Memory/session-resume.md` is **not optional**: on session wrap, overwrite the current project's section (one section per project; displace the old one to `Sessions/` if it has log value). Canonical rules live in whichever runtime file collects your recording conventions.
 
 If no Stop-hook is installed, you may manually drop a `Distilled/Sessions/YYYY-MM-DD-<slug>.md` before ending. See [`stop-hook.md`](stop-hook.md) for format.

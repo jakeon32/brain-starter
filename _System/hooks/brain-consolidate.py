@@ -7,10 +7,19 @@ Modes:
       Patterns) into topic groups ripe for Ingest.
   --ingest N       — Consolidate cluster N into one wiki page (dry-run; --apply
       to write+archive+reindex).
-  --auto           — UNATTENDED. For every cluster: consolidate via claude with
-      a quality gate (6 rules, self-assessed). Pass -> apply. "single_topic"
-      fail -> split finer and retry. Other fail -> hold (logged). Writes an
-      audit receipt to _System/audit/. --dry-run previews without writing.
+  --weekly         — scheduled hybrid entry point (since 2026-07-19). Small
+      load (clusters <= UNATTENDED_MAX_CLUSTERS) -> unattended --auto here
+      and now; backlog -> --queue (LLM 0 calls) so the next live session
+      takes over. See _System/consolidate.md §Session processing.
+  --queue          — cluster only (LLM 0 calls) and write the pending-merge
+      queue to _System/audit/consolidate-queue.json. brain-health surfaces it
+      at SessionStart; the live session merges clusters itself (Read/Write,
+      no claude -p children).
+  --auto           — UNATTENDED fallback (capped at AUTO_MAX_CALLS claude
+      calls/run). For every cluster: consolidate via claude with a quality
+      gate (6 rules, self-assessed). Pass -> apply. "single_topic" fail ->
+      split finer and retry. Other fail -> hold (logged). Writes an audit
+      receipt to _System/audit/. --dry-run previews without writing.
 
 Quality rules (the schema the human curates; everything else is automatic):
   complete · coherent · current · single_topic · format_ok · lean
@@ -50,6 +59,17 @@ CLAUDE_BIN = os.environ.get("CLAUDE_DISTILL_CLAUDE_BIN", "claude")
 CLAUDE_BIN = shutil.which(CLAUDE_BIN) or CLAUDE_BIN  # resolve .CMD shim on Windows
 INGEST_MODEL = os.environ.get("BRAIN_CONSOLIDATE_MODEL", "claude-sonnet-4-6")
 AUTO_MAX_DEPTH = int(os.environ.get("BRAIN_CONSOLIDATE_AUTO_DEPTH", "3"))
+# 런당 claude 총 호출 상한. 깊이 제한은 클러스터당이라 총량을 못 막는다 —
+# 백로그가 크면 분할 재시도가 호출을 수백 회로 불려 사용 한도를 태운다
+# (2026-07-19 한 기기에서: 자식 콘솔 창 ~1000개, 구독 한도 소진).
+AUTO_MAX_CALLS = int(os.environ.get("BRAIN_CONSOLIDATE_MAX_CALLS", "80"))
+# --queue가 쓰는 통합 대기열. per-device 런타임(_System/audit/)이라 동기화 안 됨.
+QUEUE_PATH_REL = Path("_System") / "audit" / "consolidate-queue.json"
+# --weekly 하이브리드 분기점: 클러스터가 이 수 이하면 평시 부하로 보고 기존
+# 무인 --auto(상한 내 소수 호출)로 처리, 초과하면 백로그 상황 — LLM을 아예
+# 안 부르고 대기열만 써서 세션이 이어받게 한다 (2026-07-19 설계).
+UNATTENDED_MAX_CLUSTERS = int(
+    os.environ.get("BRAIN_CONSOLIDATE_UNATTENDED_MAX", "12"))
 AUTO_COS_STEP = float(os.environ.get("BRAIN_CONSOLIDATE_AUTO_STEP", "0.08"))
 AUTO_BASE_COS = float(os.environ.get("BRAIN_CONSOLIDATE_AUTO_COS", "0.60"))
 # Objective cohesion floor: a group larger than TRUST_SIZE whose min pairwise
@@ -185,16 +205,35 @@ def fragment_body(fp):
     return FRONTMATTER_RE.sub("", txt, count=1).strip()
 
 
+class ClaudeBudgetExhausted(Exception):
+    """런당 호출 상한(AUTO_MAX_CALLS) 도달 — do_auto가 잡아 남은 작업을 이월한다."""
+
+
+_claude_calls = 0
+
+
 def call_claude(prompt, schema, model, effort, timeout):
+    global _claude_calls
+    if _claude_calls >= AUTO_MAX_CALLS:
+        raise ClaudeBudgetExhausted(f"claude 호출 상한({AUTO_MAX_CALLS}회) 도달")
+    _claude_calls += 1
+    # --strict-mcp-config + 빈 mcp-config: 자식 헤드리스 세션이 MCP·채널 플러그인을
+    # 부팅하지 않게 차단. Discord 플러그인이 부팅되면 호출 1회당 봇 게이트웨이 세션
+    # 1회를 소모 — 대량 런이 24h 한도(1000회)를 태워 봇을 오프라인시킨다 (2026-07-19).
     cmd = [CLAUDE_BIN, "-p", "--model", model, "--output-format", "json",
            "--json-schema", json.dumps(schema), "--effort", effort,
-           "--disable-slash-commands", "--no-session-persistence"]
+           "--disable-slash-commands", "--no-session-persistence",
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
     env = os.environ.copy()
     env["CLAUDE_DISTILL_CHILD"] = "1"  # stop child Stop-hook re-distilling
     try:
+        # CREATE_NO_WINDOW: Windows에서 자식마다 콘솔 창이 뜨는 것 차단
+        # (POSIX에서는 속성이 없어 0 — 무동작).
         proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
-                              timeout=timeout, check=False, env=env)
+                              timeout=timeout, check=False, env=env,
+                              creationflags=getattr(subprocess,
+                                                    "CREATE_NO_WINDOW", 0))
     except Exception as e:
         print(f"claude call failed: {e!r}", file=sys.stderr)
         return None
@@ -284,7 +323,8 @@ def write_page(slug, full, members, year, reindex=True):
         (BRAIN_VAULT / fp).rename(d / Path(fp).name)
     if reindex:
         subprocess.run([sys.executable, str(HOOKS_DIR / "brain-reindex.py")],
-                       capture_output=True, text=True, encoding="utf-8")
+                       capture_output=True, text=True, encoding="utf-8",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),)
 
 
 def do_ingest(conn, members, apply, effort):
@@ -329,6 +369,17 @@ def _split_retry(conn, members, vecs, effort, apply, thr, depth, ledger):
 
 
 def _auto_recur(conn, members, vecs, effort, apply, thr, depth, ledger):
+    # 조각은 실행 중에 이동·아카이브될 수 있다 (2026-07-18: 중복 정리가 도중에
+    # 조각 690개를 옮겨서 fragment_body의 FileNotFoundError로 70분 런 전체가
+    # 죽었다). 없어진 조각은 빼고 진행하고, 통합할 짝이 안 남으면 스킵한다 —
+    # 클러스터 하나의 문제가 런 전체를 무너뜨리지 않게 (fail-open).
+    alive = [m for m in members if (BRAIN_VAULT / m).exists()]
+    gone = [m for m in members if m not in alive]
+    if gone:
+        ledger.append(("hold", gone, "조각 소실(이동/아카이브됨) — 이번 런에서 제외"))
+    if len(alive) < 2:
+        return
+    members = alive
     cohesion = min_pairwise_cos(members, vecs)
     # Objective floor first: split big+incoherent groups BEFORE spending a
     # claude call (self-assessment runs too lenient on mixed blobs).
@@ -361,11 +412,21 @@ def do_auto(conn, vecs, clusters, dry, effort):
     print(f"## auto-consolidate ({'preview' if dry else 'APPLY'}) — 품질 게이트 무인",
           file=sys.stderr)
     ledger = []
-    for c in clusters:
-        _auto_recur(conn, c, vecs, effort, not dry, AUTO_BASE_COS, 0, ledger)
+    budget_hit = False
+    for i, c in enumerate(clusters):
+        try:
+            _auto_recur(conn, c, vecs, effort, not dry, AUTO_BASE_COS, 0, ledger)
+        except ClaudeBudgetExhausted as e:
+            # 진행 중이던 클러스터 포함 남은 전부를 보류로 이월 — 조각은 그대로
+            # 남으므로 다음 주간 런이 이어서 처리한다.
+            for rest in clusters[i:]:
+                ledger.append(("hold", rest, f"{e} — 다음 런으로 이월"))
+            budget_hit = True
+            break
     if not dry and any(s == "merged" for s, _, _ in ledger):
         subprocess.run([sys.executable, str(HOOKS_DIR / "brain-reindex.py")],
-                       capture_output=True, text=True, encoding="utf-8")
+                       capture_output=True, text=True, encoding="utf-8",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),)
 
     merged = [(m, i) for s, m, i in ledger if s == "merged"]
     held = [(m, i) for s, m, i in ledger if s == "hold"]
@@ -373,7 +434,9 @@ def do_auto(conn, vecs, clusters, dry, effort):
 
     lines = [f"# consolidate 영수증 ({'preview' if dry else 'applied'}) "
              f"{datetime.date.today().isoformat()}",
-             f"통합 {len(merged)} / 보류 {len(held)} / 실패 {len(failed)}", ""]
+             f"통합 {len(merged)} / 보류 {len(held)} / 실패 {len(failed)}",
+             f"claude 호출 {_claude_calls}회 / 상한 {AUTO_MAX_CALLS}회"
+             + (" — 상한 도달로 조기 종료" if budget_hit else ""), ""]
     for m, slug in merged:
         lines.append(f"- ✅ 통합 → Knowledge/{slug}.md  ({len(m)}개 조각)")
     for m, iss in held:
@@ -401,12 +464,12 @@ def do_auto(conn, vecs, clusters, dry, effort):
             try:
                 subprocess.run([sys.executable, str(decay), "--apply"],
                                capture_output=True, text=True,
-                               encoding="utf-8", timeout=600)
+                               encoding="utf-8", timeout=600,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),)
                 print("decay: swept (receipt in _System/audit/)")
             except Exception as e:
                 print(f"decay: skipped ({e!r})", file=sys.stderr)
-        # P0 (2026-07-13, docs/plans/2026-07-13-refined-layer-cross-device-
-        # sync-design.md): push any scope:shared Knowledge/Memory changes to
+        # P0 (2026-07-13): push any scope:shared Knowledge/Memory changes to
         # the remote after this run. Runs last (after decay) -- order doesn't
         # matter functionally (decay only touches journals, sync only touches
         # Knowledge/Memory) but this matches "chain more steps at the end."
@@ -416,7 +479,8 @@ def do_auto(conn, vecs, clusters, dry, effort):
             try:
                 sp = subprocess.run([sys.executable, str(sync), "--push"],
                                     capture_output=True, text=True,
-                                    encoding="utf-8", timeout=120)
+                                    encoding="utf-8", timeout=120,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),)
                 if sp.returncode == 0:
                     print("sync: shared content pushed (or nothing to push)")
                 else:
@@ -425,6 +489,59 @@ def do_auto(conn, vecs, clusters, dry, effort):
             except Exception as e:
                 print(f"sync: skipped ({e!r})", file=sys.stderr)
     return 0
+
+
+# ---- queue (cluster only, LLM 0회 — 세션이 이어받는다) ----------------------
+
+def do_queue(vecs, clusters):
+    """클러스터링 결과를 대기열 파일로 저장만 한다. claude 호출 0회.
+
+    처리 주체는 다음 세션의 claude (brain-health가 대기 건수를 알리고,
+    세션이 _System/consolidate.md §Session processing 계약대로 직접 통합).
+    빈 클러스터여도 파일을 써서 brain-health가 '대기 0'을 알 수 있게 한다.
+    """
+    payload = {
+        "generated": datetime.date.today().isoformat(),
+        "singletons": len(vecs) - sum(len(c) for c in clusters),
+        "clusters": [],
+    }
+    for members in clusters:
+        common = set.intersection(*[slug_tokens(m) for m in members])
+        tagc = Counter(t for m in members for t in file_tags(m))
+        payload["clusters"].append({
+            "size": len(members), "common_slug": sorted(common),
+            "top_tags": [t for t, _ in tagc.most_common(4)],
+            "files": sorted(members)})
+    out = BRAIN_VAULT / QUEUE_PATH_REL
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                   encoding="utf-8")
+    n_frag = sum(len(c) for c in clusters)
+    print(f"통합 대기열 갱신: {len(clusters)}클러스터 / {n_frag}조각 → "
+          f"{QUEUE_PATH_REL}")
+    return 0
+
+
+def do_weekly(conn, vecs, clusters, effort):
+    """주간 스케줄 진입점 (하이브리드, 2026-07-19).
+
+    평시(클러스터 ≤ UNATTENDED_MAX_CLUSTERS)는 기존 무인 --auto로 그 자리에서
+    끝내고, 백로그(초과)면 LLM 호출 없이 대기열만 남겨 세션이 이어받게 한다.
+    문제 없을 때의 자동화 편의와 문제 상황의 폭주 차단을 동시에 잡는 분기.
+    """
+    if len(clusters) <= UNATTENDED_MAX_CLUSTERS:
+        print(f"weekly: {len(clusters)}클러스터 ≤ 임계 {UNATTENDED_MAX_CLUSTERS}"
+              f" — 무인 처리", file=sys.stderr)
+        rc = do_auto(conn, vecs, clusters, dry=False, effort=effort)
+        # 무인으로 다 처리했으면 이전 주의 대기열은 낡은 정보 — 치운다.
+        stale = BRAIN_VAULT / QUEUE_PATH_REL
+        if stale.exists():
+            stale.unlink()
+        return rc
+    print(f"weekly: {len(clusters)}클러스터 > 임계 {UNATTENDED_MAX_CLUSTERS}"
+          f" — 백로그로 판단, LLM 호출 없이 대기열 생성 (세션 처리로 이월)",
+          file=sys.stderr)
+    return do_queue(vecs, clusters)
 
 
 # ---- main ------------------------------------------------------------------
@@ -439,6 +556,12 @@ def main():
     ap.add_argument("--apply", action="store_true",
                     help="with --ingest: write+archive+reindex if quality passes")
     ap.add_argument("--effort", default="medium")
+    ap.add_argument("--queue", action="store_true",
+                    help="cluster only (LLM 0회) and write the pending queue "
+                         "for in-session processing")
+    ap.add_argument("--weekly", action="store_true",
+                    help="scheduled hybrid: small load -> unattended --auto, "
+                         "backlog -> --queue for in-session processing")
     ap.add_argument("--auto", action="store_true",
                     help="unattended quality-gated consolidation of all clusters")
     ap.add_argument("--dry-run", action="store_true",
@@ -453,6 +576,12 @@ def main():
     cats = (args.category,) if args.category else JOURNAL
     conn = open_db(create=False)
     vecs, clusters = detect_clusters(conn, cats, args.threshold, args.min_size)
+
+    if args.weekly:
+        return do_weekly(conn, vecs, clusters, args.effort)
+
+    if args.queue:
+        return do_queue(vecs, clusters)
 
     if args.auto:
         return do_auto(conn, vecs, clusters, args.dry_run, args.effort)

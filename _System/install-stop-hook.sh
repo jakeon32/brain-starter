@@ -17,8 +17,7 @@
 #   --dry-run     print what would happen, change nothing
 #
 # Note: the hook event is SessionEnd, not Stop — Claude Code's `Stop` hook does
-# not fire on /exit or user interrupt (see
-# Decisions/2026-05-18-stop-hook-to-sessionend-migration.md). An older version
+# not fire on /exit or user interrupt. An older version
 # of this installer patched "Stop", which a fresh device would never have fired.
 #
 # Why this exists: the hooks themselves are device-local (~/.claude/hooks/),
@@ -183,10 +182,9 @@ patch_hook "SessionEnd" "distill-session.py" "$DISTILL_CMD"
 patch_hook "SessionStart" "brain-health.py" "$HEALTH_CMD"
 # The shared layer syncs both ways or it doesn't sync: brain-health pulls at
 # SessionStart, so without this push a device only ever receives. The design
-# (docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md §Push) called
-# for this from the start; it was never wired, and scope:shared content piled
-# up on this device without ever reaching any other device -- including notes
-# meant to stop a mistake from repeating.
+# called for this from the start; it was never wired, and by 2026-07-16 six of fourteen
+# scope:shared files existed on this device only — including the one written to
+# stop a rule from being broken a fourth time.
 patch_hook "SessionEnd" "brain-sync.py" "$SYNC_CMD"
 
 # 3. Pin the interpreter that actually has the ML stack, so a bare `python
@@ -231,7 +229,7 @@ say "per device (cron cannot be re-run idempotently, so they are left to you"
 say "rather than silently duplicated). Add with: crontab -e"
 say ""
 say "1. weekly consolidate (journal -> Knowledge/ wiki convergence):"
-say "  0 4 * * 0 CLAUDE_DISTILL_VAULT=$BRAIN $PY_HINT $HOOK_DST_DIR/brain-consolidate.py --auto"
+say "  0 14 * * 0 CLAUDE_DISTILL_VAULT=$BRAIN $PY_HINT $HOOK_DST_DIR/brain-consolidate.py --weekly"
 say "   brain-health will remind you once the journal has enough files and this"
 say "   was never run (see _System/consolidate.md)."
 say ""

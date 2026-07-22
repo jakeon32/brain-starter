@@ -66,7 +66,21 @@ DEFAULT_VAULT = str(Path.home() / "brain")
 # 2026-06-11: npm path died after native-CLI migration; distill-session.py
 # now self-resolves via PATH when a pinned path goes stale. Mirror that here
 # instead of hardcoding one device's username-specific install path.
-DEFAULT_CLAUDE_BIN = shutil.which("claude") or shutil.which("claude.cmd") or "claude"
+# 2026-07-18: prefer the native .exe. shutil.which() returns claude.CMD on
+# Windows, and the .cmd shim fails with rc=1 "the system cannot find the file
+# specified" whenever stdin is a pipe -- which is how the worker feeds the
+# transcript. See _upgrade_shim() in distill-session.py for the full postmortem.
+def _default_claude_bin() -> str:
+    found = shutil.which("claude") or shutil.which("claude.cmd")
+    if found and os.name == "nt" and Path(found).suffix.lower() != ".exe":
+        exe = (Path(found).parent / "node_modules" / "@anthropic-ai"
+               / "claude-code" / "bin" / "claude.exe")
+        if exe.exists():
+            return str(exe)
+    return found or "claude"
+
+
+DEFAULT_CLAUDE_BIN = _default_claude_bin()
 
 
 def log(msg: str) -> None:
@@ -185,6 +199,7 @@ def main() -> int:
             with pf.open("rb") as stdin_f:
                 subprocess.run(
                     [sys.executable, str(DISTILL)],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     stdin=stdin_f,
                     env=env,
                     timeout=300,

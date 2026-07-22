@@ -242,11 +242,11 @@ P1 ship criterion: each of these queries returns the target file in top-3.
 
 | # | Query | Target file | Status |
 |---|---|---|---|
-| 1 | 이전 세션 누락 복구 catchup 안전망 | `Decisions/2026-05-18-distill-catchup-as-primary-defense-over-hooks.md` | ✓ top-1 |
-| 2 | Windows에서 Stop hook 실행 안 되는 문제 | `Decisions/2026-05-15-windows-stop-hook-cmd-launcher-pattern.md` | ✓ top-1 |
-| 3 | my-project 홈페이지 색상 팔레트 | `Decisions/2026-05-27-my-project-home-color-palette-warm-cream-cobalt-coral.md` | ⚠ not in top-3; specific terms ("코발트 코랄") give top-1 |
-| 4 | LTX-2.3 속도 한계 하드웨어 | `Decisions/2026-05-27-ltx-23-step-speed-is-hardware-limit-not-bug.md` | ✓ top-1 |
-| 5 | MEMORY.md를 라우터로 쓰는 이유 deterministic state | `Decisions/2026-05-18-memory-md-active-projects-as-deterministic-state.md` | ✓ top-1 |
+| 1 | 이전 세션 누락 복구 catchup 안전망 | the decision note on catchup as the primary safety net | ✓ top-1 |
+| 2 | Windows에서 hook 실행 안 되는 문제 | the decision note on the Windows launcher pattern | ✓ top-1 |
+| 3 | 홈페이지 색상 팔레트 | a decision note naming two specific colours | ⚠ not in top-3; quoting the colour names themselves gives top-1 |
+| 4 | 로컬 추론 속도가 하드웨어 한계인지 | the decision note ruling it a hardware limit, not a bug | ✓ top-1 |
+| 5 | 메모리 인덱스를 라우터로 쓰는 이유 deterministic state | the decision note on treating it as deterministic state | ✓ top-1 |
 
 4/5 perfect. Q3 fails on generic Korean ("팔레트") that doesn't appear in body text; works when query uses specific terms from the body. This is the multilingual MiniLM-L12 model's known limitation (KO abstract → KO body bridging is weaker than EN-EN). Mitigation: use BGE-m3 or similar (~2GB) if Q3-like failures become frequent — swap the model name in `_brain_lib.py`'s `EMBED_MODEL` and full-rebuild the index.
 

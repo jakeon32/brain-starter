@@ -25,8 +25,19 @@ Two entries are wired globally in `~/.claude/settings.json` — both installed b
 ```
 
 `SessionEnd` distills the session; `SessionStart` self-checks the pipeline. On
-Windows both go through generated `.cmd` launchers with the interpreter and
-`CLAUDE_DISTILL_VAULT` baked in. Authoritative source for behaviour:
+Windows both run in **exec form** — `"command": "…\pythonw.exe", "args":
+["…\brain-hook-launch.py", "<script>.py"]` — so Claude Code spawns `pythonw.exe`
+directly with no Git Bash/cmd shell and no flashing console window. The generated
+`brain-hook-launch.py` bakes `CLAUDE_DISTILL_VAULT` (and the claude bin) in, then
+runs the target script in-process. (2026-07-20; replaced the old
+`cmd //c "*.cmd"` launchers, which flashed a cmd.exe window on every session
+start/end.) The launcher being windowless is necessary but **not sufficient**:
+`pythonw.exe` has no console, so any `git`/`schtasks` child the hook scripts spawn
+gets a *new* console allocated and flashes its own window — a push alone is
+add+diff+commit+push, i.e. several. Every such blocking call therefore passes
+`creationflags=CREATE_NO_WINDOW` (`run_git` in `brain-sync.py`, the schtasks query
+in `brain-health.py`); the detached background spawns already did. Authoritative
+source for behaviour:
 `~/.claude/hooks/distill-session.py` (tracked at `_System/hooks/`).
 
 **The SessionEnd hook does not wait for the distillation.** Since 2026-07-16 the
