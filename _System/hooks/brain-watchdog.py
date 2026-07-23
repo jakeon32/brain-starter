@@ -60,6 +60,16 @@ import sys
 import time
 from pathlib import Path
 
+if sys.platform == "win32":
+    # The warnings below contain em-dashes, and a legacy console codepage (cp949
+    # here) raises UnicodeEncodeError on the first one — which killed the watchdog
+    # while it was printing the alarm it exists to raise (2026-07-22).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # A session transcript untouched this long is treated as ended, not in-progress.
 SETTLE_S = 30 * 60
 # Allowance between a session ending and the canary line landing.
@@ -110,7 +120,13 @@ def check_hook_registration(warn: list) -> None:
     for event in ("SessionStart", "SessionEnd"):
         for block in hooks.get(event) or []:
             for h in block.get("hooks") or []:
-                cmds.append((event, str(h.get("command", ""))))
+                # Exec form ({"command": "<pythonw>", "args": [launcher, script]})
+                # keeps the script name in args, not command. Reading command alone
+                # made this check report a healthy install as "hook is gone"
+                # (2026-07-22; the installer's own idempotency check reads both).
+                parts = [str(h.get("command", ""))]
+                parts += [str(a) for a in (h.get("args") or [])]
+                cmds.append((event, " ".join(parts)))
 
     for name, event in (("brain-health", "SessionStart"), ("distill-session", "SessionEnd")):
         hit = [c for e, c in cmds if e == event and name in c]
@@ -118,6 +134,11 @@ def check_hook_registration(warn: list) -> None:
             warn.append(f"{event} 훅에 {name} 등록이 사라짐 — 파이프라인이 아예 안 돈다")
             continue
         for c in hit:
+            # The two checks below are about the old `cmd //c` launcher only. Exec
+            # form has no shell in between, so neither failure mode can occur --
+            # and testing for them there would only produce false alarms.
+            if "cmd" not in c:
+                continue
             # `cmd //c` is required: Claude Code runs hooks through MSYS sh,
             # which rewrites a lone /c into a Windows path and drops the switch.
             if re.search(r"(?<!/)/c(?=\s)", c):
