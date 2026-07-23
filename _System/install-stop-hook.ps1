@@ -16,7 +16,8 @@
 #      calls through that launcher, so no console window flashes on Windows.
 #
 # Note: the hook event is SessionEnd, not Stop — Claude Code's `Stop` hook does
-# not fire on /exit or user interrupt. An older version
+# not fire on /exit or user interrupt (see
+# Decisions/2026-05-18-stop-hook-to-sessionend-migration.md). An older version
 # of this installer patched "Stop", which a fresh device would never have
 # fired.
 #
@@ -59,6 +60,7 @@ $HookFiles = @(
     "brain-decay.py",
     "brain-sync.py",
     "brain-watchdog.py",
+    "brain-backup.py",
     "distill-catchup.py",
     "_brain_lib.py"
 )
@@ -326,7 +328,8 @@ if ($DryRun) {
         if ($LASTEXITCODE -ne 0) { throw "settings.json SessionStart patch failed (python exit $LASTEXITCODE)" }
         # The shared layer syncs both ways or it doesn't sync: brain-health pulls
         # at SessionStart, so without this push a device only ever receives. The
-        # design called for this from the start; it was never wired, and by
+        # design (docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md
+        # §Push) called for this from the start; it was never wired, and by
         # 2026-07-16 six of fourteen scope:shared files existed on this device
         # only — including the one written to stop a rule being broken a 4th time.
         & $PythonBin $tmp $Settings "SessionEnd" "brain-sync" $PythonWBin $LaunchPy "brain-sync.py" "--push"

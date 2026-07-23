@@ -17,7 +17,8 @@
 #   --dry-run     print what would happen, change nothing
 #
 # Note: the hook event is SessionEnd, not Stop — Claude Code's `Stop` hook does
-# not fire on /exit or user interrupt. An older version
+# not fire on /exit or user interrupt (see
+# Decisions/2026-05-18-stop-hook-to-sessionend-migration.md). An older version
 # of this installer patched "Stop", which a fresh device would never have fired.
 #
 # Why this exists: the hooks themselves are device-local (~/.claude/hooks/),
@@ -58,6 +59,7 @@ HOOK_FILES=(
   brain-decay.py
   brain-sync.py
   brain-watchdog.py
+  brain-backup.py
   distill-catchup.py
   _brain_lib.py
 )
@@ -182,7 +184,8 @@ patch_hook "SessionEnd" "distill-session.py" "$DISTILL_CMD"
 patch_hook "SessionStart" "brain-health.py" "$HEALTH_CMD"
 # The shared layer syncs both ways or it doesn't sync: brain-health pulls at
 # SessionStart, so without this push a device only ever receives. The design
-# called for this from the start; it was never wired, and by 2026-07-16 six of fourteen
+# (docs/plans/2026-07-13-refined-layer-cross-device-sync-design.md §Push) called
+# for this from the start; it was never wired, and by 2026-07-16 six of fourteen
 # scope:shared files existed on this device only — including the one written to
 # stop a rule from being broken a fourth time.
 patch_hook "SessionEnd" "brain-sync.py" "$SYNC_CMD"

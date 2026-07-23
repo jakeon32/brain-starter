@@ -28,7 +28,8 @@ Checks:
      _catalog.md pointer, never a hand-written file listing (Knowledge/_index.md
      silently regrew 21 hand-written links by 2026-06-24 despite the catalog
      automation; git diff only surfaces it at commit time)
-  7. scope:shared pull (2026-07-13): one deliberate exception to "read-only" --
+  7. scope:shared pull (2026-07-13, docs/plans/2026-07-13-refined-layer-
+     cross-device-sync-design.md): one deliberate exception to "read-only" --
      `git pull --ff-only` for any Knowledge/Memory content tagged scope:
      shared. Bounded by a timeout so a dead network delays session start by
      at most a few seconds, never hangs it. Silent on success/no-op/offline;
@@ -59,6 +60,9 @@ FAIL_WINDOW_H = 72
 INDEX_STALE_H = 24
 CONSOLIDATE_MAX_DAYS = 9
 CONSOLIDATE_NEVER_RUN_MIN_FILES = 15
+# 저널은 gitignore된 per-device 런타임이라 push가 안 나른다 — 이 디스크가 죽으면
+# 그대로 사라진다. 백업이 조용히 멈추면 "있다고 믿는" 상태가 되어 더 나쁘다.
+BACKUP_MAX_DAYS = 8
 MEMORY_STALE_DAYS = 60
 # Caps raised 2026-07-15 (were 35KB/12). The 2026-06-12 caps were set right
 # after the 132KB/42-section append regression, when far fewer projects were
@@ -179,6 +183,29 @@ def check_consolidate_receipt(warnings: list) -> None:
         )
 
 
+def check_backup_receipt(warnings: list) -> None:
+    """저널 백업이 최근에 돌았는지. 안 돌면 이 디스크가 유일본이 된다.
+
+    영수증이 아예 없는 경우와 오래된 경우를 나눈다 — 전자는 "설정한 적 없음",
+    후자는 "돌다가 멈춤"이고 대응이 다르다. brain-sync의 영수증 방식과 같다."""
+    receipts = []
+    if AUDIT.is_dir():
+        receipts = sorted(AUDIT.glob("backup-*.md"), key=lambda f: f.stat().st_mtime)
+    if not receipts:
+        warnings.append(
+            "저널 백업 영수증이 하나도 없음 — 저널은 gitignore라 원격에 안 올라간다. "
+            "이 디스크가 죽으면 그대로 유실 → python ~/.claude/hooks/brain-backup.py "
+            "실행 + 예약작업 등록"
+        )
+        return
+    age_d = (datetime.now().timestamp() - receipts[-1].stat().st_mtime) / 86400
+    if age_d > BACKUP_MAX_DAYS:
+        warnings.append(
+            f"저널 백업이 {age_d:.0f}일째 안 돌았음 ({receipts[-1].name}) — "
+            f"예약작업이 멈췄을 수 있다 → python ~/.claude/hooks/brain-backup.py"
+        )
+
+
 def check_consolidate_queue(warnings: list) -> None:
     """통합 대기열(consolidate-queue.json)에 남은 클러스터를 세션에 알린다.
 
@@ -245,7 +272,7 @@ def _consolidate_schedule_diagnosis() -> str:
 
 
 # 끝난 일의 *기록*은 오래된 게 정상이다 — 갱신 대상이 아니라서 경고에 뜨면 오탐이다.
-# (2026-07-18: 끝난 마이그레이션 로그나 1회성 셋업 가이드 같은 문서가 매 세션 경고에 실려
+# (2026-07-18: triage-log·quartz-setup-guide 같은 1회성 기록이 매 세션 경고에 실려
 #  나왔다. 상시 오탐은 health 출력 자체를 건너뛰게 만들고, 그러면 진짜 경고를 놓친다
 #  — 같은 날 distill이 몇 주간 무증상으로 죽어 있던 사고와 같은 계열의 위험.)
 STALENESS_EXEMPT_STATUS = {"confirmed", "deployed", "done", "archived", "retired"}
@@ -381,7 +408,8 @@ def check_index_drift(warnings: list) -> None:
 
 def check_shared_sync(warnings: list) -> None:
     """git pull --ff-only for scope:shared Knowledge/Memory content. The one
-    check here that isn't purely read-only -- bounded by SYNC_PULL_TIMEOUT_S so a
+    check here that isn't purely read-only (docs/plans/2026-07-13-refined-
+    layer-cross-device-sync-design.md) -- bounded by SYNC_PULL_TIMEOUT_S so a
     dead network can't hang session start, only delay it briefly. Silent on
     success/no-op/offline (brain-sync.py itself already tells those apart);
     only a genuine divergence surfaces here."""
@@ -451,6 +479,7 @@ def main() -> None:
     check_index_staleness(warnings)
     check_consolidate_receipt(warnings)
     check_consolidate_queue(warnings)
+    check_backup_receipt(warnings)
     check_memory_staleness(warnings)
     check_resume_bloat(warnings)
     check_hot_bloat(warnings)
