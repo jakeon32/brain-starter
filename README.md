@@ -4,6 +4,8 @@
 
 brain-starter is the skeleton of a personal long-term memory vault for Claude Code (and Codex). Every time a session ends, a hook reads that session's transcript and writes out what's worth keeping — decisions made, mistakes and how they were fixed, patterns worth repeating — into plain Markdown files in this repo. Come back days or months later, in the same project or a different one, and Claude can search for what it already knows instead of re-learning it from scratch.
 
+> **Language:** this README and the `_System/` contracts are in English, but the pipeline's own runtime output — the session-start health warnings and the watchdog alarm — is written in Korean. Everything runs the same either way; [`_System/health.md`](_System/health.md) describes what each check looks for, in English.
+
 ## Why it's shaped this way
 
 The design rationale — why per-device instead of synced across machines, why a distill hook instead of one giant memory file, why search instead of re-reading old transcripts — lives in a separate guide, not here:
