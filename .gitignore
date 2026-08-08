@@ -41,6 +41,9 @@ Agents/**
 # _System/audit — per-device weekly/monthly audit results
 _System/audit/
 
+# Memory-graph HTML (brain-graph.py output) — it embeds every note title, so it never goes to a remote
+_System/brain-graph.html
+
 # macOS
 .DS_Store
 **/.DS_Store
