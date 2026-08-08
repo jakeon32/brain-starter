@@ -7,9 +7,11 @@ files tagged `scope: shared` in frontmatter).
 Modes:
   --pull   — SessionStart-time. `git pull --ff-only`. Exits 0 (silent) on
       success, no-op, or "can't reach remote" (offline is normal — a laptop
-      not always connected shouldn't warn). Exits 1 only when the fast-
-      forward genuinely can't apply (local unpushed commits diverged from a
-      remote update) — brain-health.py should surface that as a warning.
+      not always connected shouldn't warn). On any other failure it asks the
+      REFS whether the branches actually diverged (ahead_behind) rather than
+      trusting the failure itself — concurrent sessions make transient fetch
+      collisions routine. Exits 1 only when local and remote each hold commits
+      the other lacks — brain-health.py surfaces that as a warning.
   --push   — SessionEnd / post-consolidate-time. Force-adds every file
       tagged `scope: shared`, commits if anything actually changed, pushes.
       On a rejected push (non-fast-forward): one `git pull --rebase` retry.
@@ -106,6 +108,26 @@ def write_receipt(lines: list[str]) -> None:
     path.write_text(existing + f"\n## {ts}\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
 
+def ahead_behind() -> tuple[int | None, int | None]:
+    """(commits only local, commits only upstream), or (None, None) if unreadable.
+
+    Read from refs, not from a command's exit code — that's the whole point of
+    the 2026-08-06 fix below.
+    """
+    if run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).returncode != 0:
+        return (None, None)  # no upstream configured — nothing to diverge from
+    counts = run_git(["rev-list", "--left-right", "--count", "HEAD...@{u}"])
+    if counts.returncode != 0:
+        return (None, None)
+    parts = counts.stdout.split()
+    if len(parts) != 2:
+        return (None, None)
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return (None, None)
+
+
 def cmd_pull(args) -> int:
     proc = run_git(["pull", "--ff-only"])
     if proc.returncode == 0:
@@ -113,9 +135,27 @@ def cmd_pull(args) -> int:
     stderr_lower = proc.stderr.lower()
     if any(hint in stderr_lower for hint in _OFFLINE_HINTS):
         return 0  # offline is normal, not a problem to surface
-    # Anything else (usually: local commits diverged from remote) is worth a warning.
-    print("brain-sync --pull: local shared content has diverged from the remote "
-          "and could not fast-forward. Run `git pull` manually in the brain vault.",
+
+    # A failed pull is NOT evidence of divergence (2026-08-06). Several sessions
+    # write this vault concurrently — every SessionEnd fires --push, so on a busy
+    # day that's a commit every ~30min (see audit/sync-*.md, and the "pushed: yes
+    # (after rebase retry)" receipts). A --pull landing inside another process's
+    # fetch hits transient failures: "Cannot fast-forward to multiple branches"
+    # (FETCH_HEAD mid-write), index.lock, and friends. Classifying those by error
+    # STRING meant that list grew forever and every miss was reported to the user
+    # as a permanent divergence needing a manual `git pull` — a false alarm that
+    # trains them to ignore the real one. So: ask the refs what's actually true.
+    ahead, behind = ahead_behind()
+    if ahead is None:
+        return 0  # can't read state — stay silent; a false alarm costs more than a miss
+    if not (ahead and behind):
+        # ahead==0: nothing local to conflict, the next pull fast-forwards.
+        # behind==0: local is merely unpushed — --push handles that, not the user.
+        return 0
+
+    print(f"brain-sync --pull: local shared content has diverged from the remote "
+          f"({ahead} local-only commit(s) vs {behind} remote-only) and could not "
+          f"fast-forward. Run `git pull` manually in the brain vault.",
           file=sys.stderr)
     print(proc.stderr.strip(), file=sys.stderr)
     return 1

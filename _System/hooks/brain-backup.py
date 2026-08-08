@@ -63,7 +63,14 @@ KEEP = int(os.environ.get("BRAIN_BACKUP_KEEP", "14"))
 
 # .git is already on the remote; __pycache__ is build output. Everything else,
 # including archived/, is backed up — archived notes are history, not garbage.
-SKIP_DIRS = {".git", "__pycache__", ".obsidian", "node_modules"}
+# `_secrets` is excluded deliberately (2026-08-06). It holds the vault's one
+# canonical key file in plaintext, and the archive is a single portable zip —
+# far easier to copy, sync, or hand to someone than the vault itself. The keys
+# are all re-issuable from their providers; the journal is not. Durability is
+# worth buying for the irreplaceable half only.
+# Consequence to accept: a disk failure loses the key file. Re-issue from each
+# provider and rebuild `_secrets/keys.md` — that is the intended recovery path.
+SKIP_DIRS = {".git", "__pycache__", ".obsidian", "node_modules", "_secrets"}
 SKIP_SUFFIX = {".pyc", ".sqlite", ".sqlite-wal", ".sqlite-shm"}
 
 # Files worth keeping that live outside the vault. The global CLAUDE.md is the

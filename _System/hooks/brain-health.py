@@ -22,8 +22,9 @@ Checks:
   2. search index staleness: newest brain .md vs brain-index.sqlite mtime
   3. weekly consolidate receipt missing (> 9 days)
   4. Memory/*.md untouched > 60 days (reference facts going stale)
-  5. Memory/session-resume.md bloat: size/section caps (append-instead-of-
-     overwrite regression guard; the file hit 132KB/42 sections by 2026-06-12)
+  5. resume bloat: per-project state files under Memory/resume/ (and the
+     session-resume.md index) growing past their caps -- usually knowledge
+     leaking into a state file
   6. _index.md catalog drift: tracked _index.md must stay curated prose + a
      _catalog.md pointer, never a hand-written file listing (Knowledge/_index.md
      silently regrew 21 hand-written links by 2026-06-24 despite the catalog
@@ -69,8 +70,13 @@ MEMORY_STALE_DAYS = 60
 # live. With 13 genuinely active projects each carrying 5-7 entry points, the
 # old caps fired every session on a *healthy* file -- and a warning that is
 # always on trains you to skim past the block that carries the real ones.
-RESUME_MAX_KB = 55
-RESUME_MAX_SECTIONS = 18
+# 2026-07-29: 한 파일에 전 프로젝트를 담던 구조를 프로젝트당 파일로 분리했다.
+# 크기 = 프로젝트 수 x 섹션 크기였던 탓에, 덮어쓰기 규칙을 지켜도 2~3주마다
+# 한계를 넘었다(6/12 132KB · 7/2 49KB · 7/15 62KB · 7/29 68KB — 네 번 슬림).
+# 이제 검사 단위는 파일 하나가 아니라 Memory/resume/*.md 각각이다.
+RESUME_INDEX_MAX_KB = 8        # 인덱스는 프로젝트당 한 줄 — 넘으면 본문이 새어든 것
+RESUME_INDEX_MAX_SECTIONS = 6  # 새 인덱스의 ## 는 3개. 늘면 옛 단일파일로 회귀한 것
+RESUME_FILE_MAX_KB = 8         # 프로젝트 파일 권장 ~6KB — 넘으면 대개 지식이 섞인 것
 # hot.md는 *직전 세션* 캐시 — 정상 크기는 몇 KB다. 2026-07-18에 160KB(3주치
 # 블록 누적)로 발견됐는데 resume만 검사하고 hot은 검사 항목이 아니어서 조용히
 # 컸다. 같은 append-회귀 병이므로 같은 방식으로 감시한다.
@@ -308,45 +314,59 @@ def check_memory_staleness(warnings: list) -> None:
 
 
 def check_resume_bloat(warnings: list) -> None:
-    """session-resume.md must stay one-section-per-project, overwritten each
-    wrap (recording-protocol §세션 연속성).
+    """resume 상태는 프로젝트당 한 파일(Memory/resume/<project>.md)이고
+    Memory/session-resume.md는 그 인덱스다 (recording-protocol §세션 연속성).
 
-    Two different failures trip this, and they need different fixes, so name the
-    one that actually happened. Blaming append when the section count is fine
-    sends the reader looking for duplicate sections that are not there — and a
-    warning that misdiagnoses is how a reader learns to skim past the ones that
-    do not (2026-07-16: fired at 14 sections, limit 18, and said "append is
-    back")."""
-    resume = BRAIN / "Memory" / "session-resume.md"
-    if not resume.exists():
+    2026-07-29 개편 전에는 한 파일에 전 프로젝트가 들어 있었다. 그 구조에서는
+    파일 크기 = 프로젝트 수 x 섹션 크기라, 덮어쓰기 규칙을 지켜도 프로젝트가
+    늘면 반드시 한계를 넘었다(네 번 슬림했다). 이제 부푸는 단위가 파일별이므로
+    **어느 파일인지 이름을 대고** 경고한다 — 자기 프로젝트가 아니면 그 세션은
+    넘어가면 된다. 이름을 안 대면 무관한 세션이 매번 경고를 받고, 늘 켜져 있는
+    경고는 읽는 사람을 훈련시켜 진짜 경고까지 건너뛰게 만든다."""
+    index = BRAIN / "Memory" / "session-resume.md"
+    resume_dir = BRAIN / "Memory" / "resume"
+
+    if index.exists():
+        size_kb = index.stat().st_size / 1024
+        try:
+            sections = sum(
+                1 for ln in index.read_text(encoding="utf-8", errors="replace")
+                .splitlines() if ln.startswith("## ")
+            )
+        except OSError:
+            sections = 0
+        if sections > RESUME_INDEX_MAX_SECTIONS or size_kb > RESUME_INDEX_MAX_KB:
+            warnings.append(
+                f"session-resume.md(인덱스) 비대화: {size_kb:.0f}KB / ## {sections}개 "
+                f"(한계 {RESUME_INDEX_MAX_KB}KB·{RESUME_INDEX_MAX_SECTIONS}개) — "
+                f"인덱스에 본문이 새어들었다. 프로젝트 내용은 "
+                f"Memory/resume/<프로젝트>.md로 옮기고 인덱스엔 한 줄만 남긴다 "
+                f"(recording-protocol §세션 연속성)"
+            )
+
+    if not resume_dir.is_dir():
         return
-    size_kb = resume.stat().st_size / 1024
     try:
-        sections = sum(
-            1 for ln in resume.read_text(encoding="utf-8", errors="replace")
-            .splitlines() if ln.startswith("## ")
+        fat = sorted(
+            (
+                (f.stat().st_size / 1024, f.name)
+                for f in resume_dir.glob("*.md")
+                if f.stat().st_size / 1024 > RESUME_FILE_MAX_KB
+            ),
+            reverse=True,
         )
     except OSError:
         return
-    over_sections = sections > RESUME_MAX_SECTIONS
-    over_size = size_kb > RESUME_MAX_KB
-    if not (over_sections or over_size):
+    if not fat:
         return
-    if over_sections:
-        diagnosis = (
-            "섹션 수 초과. 프로젝트당 1섹션 덮어쓰기가 append로 돌아갔거나 "
-            "끝난 프로젝트 섹션이 남아 있다. 끝난 섹션 삭제가 1순위"
-        )
-    else:
-        diagnosis = (
-            "섹션 수는 정상이고 append도 아니다. 섹션당 내용이 길어진 것. "
-            "끝난 프로젝트 섹션을 지우고, 남길 섹션은 '다음 진입점' 위주로 압축"
-        )
+    shown = " · ".join(f"{name} {kb:.0f}KB" for kb, name in fat[:4])
+    more = f" 외 {len(fat) - 4}개" if len(fat) > 4 else ""
     warnings.append(
-        f"session-resume.md 비대화: {size_kb:.0f}KB / 섹션 {sections}개 "
-        f"(한계 {RESUME_MAX_KB}KB·{RESUME_MAX_SECTIONS}개) — {diagnosis}. "
-        f"일지 가치가 있는 과거 섹션은 Sessions/로 이관 "
-        f"(recording-protocol §세션 연속성)"
+        f"resume 파일 비대화 ({RESUME_FILE_MAX_KB}KB 초과): {shown}{more} — "
+        f"진입점·재개 식별자·그 프로젝트 고유 함정만 남기고, 재사용 지식은 "
+        f"Knowledge/로 옮긴 뒤 [[링크]]만 둔다. 끝난 프로젝트면 "
+        f"resume/_done/으로 이동이 먼저. "
+        f"자기 프로젝트 파일이 아니면 이번 세션은 넘어가도 된다"
     )
 
 

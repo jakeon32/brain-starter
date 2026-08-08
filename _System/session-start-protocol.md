@@ -33,19 +33,19 @@ When you (Claude) open a fresh session and see `~/brain/` exists, read in this o
 
 1. `~/brain/_index.md` — what this vault is and where things live
 2. `~/brain/Memory/profile.md` — who the user is (if exists)
-3. `~/brain/Memory/session-resume.md` — where the last session left off (if exists). Read only the section for the current project (cwd); one section per project, overwritten each wrap.
+3. `~/brain/Memory/session-resume.md` — **index only** (one line per project). Find the row matching the current project (cwd), then read that one file under `Memory/resume/<project>.md`. Don't read the other projects' files. (A single combined file grows past its cap every few weeks, because its size is project count × section size.)
 4. `~/brain/Memory/projects.md` — what's currently in flight (if exists)
 
 Stop after step 1 if the user's request has nothing to do with their personal context (e.g. a one-off `ls` or generic question). Reading is cheap, but inflating context costs tokens.
 
 ## Resume procedure ("이어서 하자" — added 2026-06-12)
 
-> 한국어 요약: 재개 발화 시 확인 3단계 — resume 섹션 실제 Read → 최신성 교차검증 → 재개 선언 후 시작. 진입점 1번 고정, 임의 트랙 선택 금지. 정본은 기록 규칙을 모아둔 런타임 문서 하나다.
+> 한국어 요약: 재개 발화 시 확인 3단계 — 인덱스에서 찾은 resume 파일 실제 Read → 최신성 교차검증 → 재개 선언 후 시작. 진입점 1번 고정, 임의 트랙 선택 금지. 정본은 기록 규칙을 모아둔 런타임 문서 하나다.
 
 When the user says "continue from last session" (이어서 하자 / 지난 세션에 이어서 / 계속하자 / 어디까지 했지), three steps are **mandatory before any work**:
 
-1. **Actually Read** the current project's section in `Memory/session-resume.md` — never resume from memory, conversation summary, or brain-search fragments alone.
-2. **Cross-check freshness** — if the project shows work newer than the section date (git log, latest CR record, daily note), the resume is stale: inspect those traces first and tell the user the resume missed a session.
+1. **Actually Read** the current project's file — look up the row in `Memory/session-resume.md` (index), then Read `Memory/resume/<project>.md`. Never resume from memory, conversation summary, or brain-search fragments alone.
+2. **Cross-check freshness** — if the project shows work newer than the file's `updated` (git log, latest ticket, daily note), the resume is stale: inspect those traces first and tell the user the resume missed a session.
 3. **Declare before starting** — one line: "직전 세션 = X / 진입점 1번 = Y → 여기부터 재개". This lets the user catch a wrong resume at second zero.
 
 Resume target is **entry point #1 = the last active track, verbatim**. Entry-point order is the user's priority — no reordering, no skipping. If #1 is blocked on user input, do **not** silently switch to another track; report what input is needed. ("Autonomous mode, don't ask" governs *how* to proceed, not *what* to work on.) Track switches happen only on explicit user request. This section exists because on 2026-06-11 a session resumed into the wrong track by autonomously skipping entry point #1.
@@ -90,6 +90,6 @@ If that content is empty or already gone, triage is already done (on this or oth
 
 ## Write rules at session end
 
-If a Stop-hook is installed, it handles the journal layer (`Decisions/Mistakes/Patterns`). Updating `Memory/session-resume.md` is **not optional**: on session wrap, overwrite the current project's section (one section per project; displace the old one to `Sessions/` if it has log value). Canonical rules live in whichever runtime file collects your recording conventions.
+If a Stop-hook is installed, it handles the journal layer (`Decisions/Mistakes/Patterns`). Updating the resume state is **not optional**: on session wrap, overwrite `Memory/resume/<project>.md` (that one file only) and refresh its row in the `Memory/session-resume.md` index; displace the old content to `Sessions/` if it has log value. Keep the file to next-entry-points, re-entry identifiers, and project-specific traps — reusable know-how belongs in `Knowledge/` with only a `[[link]]` here. Canonical rules live in whichever runtime file collects your recording conventions.
 
 If no Stop-hook is installed, you may manually drop a `Distilled/Sessions/YYYY-MM-DD-<slug>.md` before ending. See [`stop-hook.md`](stop-hook.md) for format.

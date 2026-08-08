@@ -2,7 +2,7 @@
 title: brain-consolidate — LLM-wiki Ingest/Lint contract
 type: spec
 status: confirmed
-updated: 2026-07-19
+updated: 2026-08-06
 ---
 
 # brain-consolidate (Ingest + Lint automation)
@@ -36,6 +36,17 @@ cluster → claude -p 통합(품질룰 프롬프트) → 6-rule self-assess
 - **archive-not-delete** — consolidated fragments move to `<category>/archived/<year>/`, excluded from brain-search (`_brain_lib.iter_markdown_files`). Rollback = move back + delete page.
 - **cohesion floor** (`AUTO_HARD_COS=0.35`, `AUTO_TRUST_SIZE=3`) overrides the LLM's lenient self-assessment for large incoherent groups (it once rated a 21-file blob single_topic=true).
 - **quality gate** ([`consolidation-quality.md`](consolidation-quality.md)) holds bad merges instead of writing them.
+- **fail-open on missing fragments** (2026-07-19) — a fragment path that no longer resolves is logged and skipped, never raised. A `FileNotFoundError` used to kill the whole run; stale paths are normal because dedupe/decay move files between queue generation and processing.
+
+### Diagnosing a mass failure
+
+> **개요 (한국어):** `rc=1` + stderr 빈 값으로 전량 실패하면 **세션 한도 소모**를 먼저 의심한다. 환경(SSL·네트워크) 탓으로 넘겨짚지 말 것.
+
+650 consolidate calls once failed with `rc=1` and an empty stderr. It was misdiagnosed as an
+SSL-blocked environment; the real cause was the **Discord plugin booting inside every `claude -p`
+child and exhausting the gateway session limit**. Both look identical from the log. The
+discriminator is a **single isolated call** — run one by hand with the plugin surface removed. Check
+session-limit exhaustion before blaming the environment.
 
 ## Session processing (2026-07-19)
 

@@ -26,7 +26,14 @@ from pathlib import Path
 # generated launcher and distill-session.py's own spawn always pass
 # CLAUDE_DISTILL_VAULT explicitly; this fallback only matters for an ad-hoc
 # invocation with no env var set.
-BRAIN = Path(os.environ.get("CLAUDE_DISTILL_VAULT", str(Path.home() / "brain")))
+# BRAIN_VAULT is honoured too, matching _brain_lib.py's precedence — a device may
+# set only that one, and without this the ad-hoc run silently targets the wrong
+# path and exits with "brain vault missing".
+BRAIN = Path(
+    os.environ.get("BRAIN_VAULT")
+    or os.environ.get("CLAUDE_DISTILL_VAULT")
+    or str(Path.home() / "brain")
+)
 
 # folder -> grouping style
 FOLDERS = {
