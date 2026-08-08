@@ -133,6 +133,13 @@ ALLOW: dict[str, list[str]] = {
     # shape check on ordinary long all-caps words in license boilerplate
     # (e.g. copyright, connection) — false positives on legal text, not ids.
     "LICENSE": ["vault-id"],
+    # Same MIT-boilerplate false positive as LICENSE above: these two carry
+    # the upstream license text for the bundled Obsidian skills
+    # (kepano/obsidian-skills), whose all-caps disclaimer words (copyright,
+    # connection — uppercased in the legal text) trip the Slack-channel-id
+    # shape check.
+    ".claude/skills/README.md": ["vault-id"],
+    ".agents/skills/README.md": ["vault-id"],
     # The one hit here is the real, public GitHub username in this repo's own
     # clone URL and companion-guide link — the repo's real address, not
     # private data about anyone. Only relevant when a maintainer's own local
