@@ -35,6 +35,21 @@ Safety:
     never retried (prevents first-run flood over full history).
   - MAX_PER_RUN caps work per invocation.
   - distill-session.py uses `claude -p --bare` so no recursive SessionStart.
+
+Concurrency (2026-08-07): this loop *looks* sequential -- subprocess.run blocks
+-- but distill-session.py detaches itself the moment it is invoked (see
+_respawn_detached there: it exists because the SessionEnd hook's process tree is
+torn down mid-LLM-call). So run() returned in ~0.2s and the loop fired all
+MAX_PER_RUN workers at once; each worker's `claude` grandchildren allocate their
+own consoles, and a backlog of 8 sessions flashed 8 cmd windows across the
+user's screen. Fix, in two parts:
+  1. This script self-detaches ONCE into a single background runner, so session
+     start still returns immediately (the pre-existing latency contract).
+  2. The runner sets CLAUDE_DISTILL_DETACHED=1 on each child, which makes
+     distill-session.py skip its own detach and run inline -- restoring the
+     blocking semantics this loop was written to rely on. One worker, one
+     console, at a time.
+The hook's own detach is untouched; it still needs it.
 """
 import json
 import os
@@ -113,6 +128,38 @@ def processed_ids() -> set:
     return {sid for m in OUTCOME_RE.finditer(txt) for sid in m.groups() if sid}
 
 
+def _spawn_runner() -> bool:
+    """Re-launch this script detached as the single sequential runner.
+
+    Returns True if it took over. Fail-open: any problem here means we just do
+    the recovery inline in this process (slower for the caller, still correct).
+    """
+    try:
+        env = dict(os.environ)
+        env["CLAUDE_CATCHUP_RUNNER"] = "1"
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+            )
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            env=env,
+            **kwargs,
+        )
+        log("sequential runner spawned; returning")
+        return True
+    except Exception as e:  # noqa: BLE001 - fail-open by design
+        log(f"runner spawn failed ({e!r}); recovering inline")
+        return False
+
+
 def main() -> int:
     dry = "--dry" in sys.argv[1:]
     # Current live session: env is authoritative (CLI 2.1.140 exports it).
@@ -179,9 +226,22 @@ def main() -> int:
         return 0
     log(summary)
 
+    # Hand the whole queue to one detached runner and return, so the caller
+    # (session start) is not blocked for MAX_PER_RUN x ~30s. The runner does
+    # the recovery strictly one at a time -- see the Concurrency note up top.
+    if not os.environ.get("CLAUDE_CATCHUP_RUNNER") and _spawn_runner():
+        return 0
+
     env = dict(os.environ)
     env.setdefault("CLAUDE_DISTILL_VAULT", DEFAULT_VAULT)
     env.setdefault("CLAUDE_DISTILL_CLAUDE_BIN", DEFAULT_CLAUDE_BIN)
+    # Suppress the child's own detach so subprocess.run below actually waits.
+    env["CLAUDE_DISTILL_DETACHED"] = "1"
+    # ...and drop any inherited hand-off path: with DETACHED=1 the child calls
+    # _cleanup_payload_file(), which unlinks whatever CLAUDE_DISTILL_PAYLOAD_FILE
+    # points at. Ours is still open as the child's stdin, so the parent deletes
+    # it after the run instead.
+    env.pop("CLAUDE_DISTILL_PAYLOAD_FILE", None)
 
     n = 0
     for _, p, sid8 in candidates[:MAX_PER_RUN]:
@@ -208,6 +268,11 @@ def main() -> int:
             log(f"recover timeout session {sid8}")
         except Exception as e:  # noqa: BLE001 - fail-silent by design
             log(f"recover error session {sid8}: {e!r}")
+        finally:
+            try:
+                pf.unlink()  # child can't: it is still open as the child's stdin
+            except OSError:
+                pass
         n += 1
 
     log(f"catchup done, processed {n} session(s)")

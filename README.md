@@ -48,6 +48,17 @@ The installer prints two recurring jobs at the very end of its own output instea
 
 Copy the exact command from the installer's own output rather than from anywhere else — it bakes in your real paths.
 
+## Automatic recall
+
+Claude does not have to remember to search. The installer also wires two small hooks:
+
+- **On every prompt** (`brain-recall-inject.py`) — a ~0.1 s keyword search adds the titles and paths of up to three relevant notes to the prompt. Titles only, never bodies; Claude opens one if it looks useful. A rarity gate and a score floor keep it quiet on small talk. Turn it off with `BRAIN_RECALL_INJECT=0`.
+- **On every read** (`brain-recall-read.py`) — a note counts as recalled only when Claude actually opens it, once per session. That is what slows its decay ([`_System/decay.md`](_System/decay.md)).
+
+To see whether injected notes are actually being opened: `python _System/recall-ratio.py`. For a one-screen status of the vault measured from the files themselves (backlog, usage, receipts, drift between docs and reality): `python ~/.claude/hooks/brain-status.py`.
+
+Optional: per-project know-how books under `Knowledge/Projects/` — see [`_System/knowledge-model.md`](_System/knowledge-model.md). Nothing changes until you create that folder.
+
 ## Requirements
 
 - Python 3.10+ (some hook scripts use `X | None`-style type hints that only run on 3.10 or newer)

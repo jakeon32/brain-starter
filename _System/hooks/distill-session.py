@@ -97,9 +97,57 @@ def _resolve_claude_bin() -> str:
 CLAUDE_BIN = _resolve_claude_bin()
 DISTILL_MODEL = os.environ.get("CLAUDE_DISTILL_MODEL", "claude-sonnet-4-6")
 MIN_TURNS = int(os.environ.get("CLAUDE_DISTILL_MIN_TURNS", "6"))
+# Incremental guard (2026-08-03): the Stop hook fires after *every* assistant
+# reply, and this script re-summarises the whole transcript each time — a 900-turn
+# session produced 40 notes in one day, ~5x duplicated per topic. Only re-run once
+# the session has grown by this many turns since the last successful distillation.
+# The guard applies ONLY to payloads whose hook_event_name is "Stop". SessionEnd,
+# distill-catchup and hand runs always proceed — otherwise a session shorter than
+# MIN_TURN_DELTA would never be distilled at all on a device that, like this
+# skeleton's installer, wires only SessionEnd. CLAUDE_DISTILL_FORCE=1 also bypasses it.
+MIN_TURN_DELTA = int(os.environ.get("CLAUDE_DISTILL_MIN_TURN_DELTA", "50"))
+FORCE_RUN = os.environ.get("CLAUDE_DISTILL_FORCE", "") not in ("", "0", "false")
+STATE_PATH = Path(os.environ.get(
+    "CLAUDE_DISTILL_STATE",
+    str(Path.home() / ".claude" / "logs" / "distill-state.json"),
+))
+
+
+def _load_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # keep the file from growing without bound across sessions
+        if len(state) > 200:
+            state = dict(sorted(state.items(), key=lambda kv: kv[1], reverse=True)[:100])
+        STATE_PATH.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    except Exception as e:
+        log(f"state write failed: {e!r}")
 # Importance gate (P1, 2026-07-12): items scored at or below this are dropped
 # instead of written. Scoring rubric lives in DISTILL_PROMPT_TEMPLATE.
-MIN_IMPORTANCE = int(os.environ.get("CLAUDE_DISTILL_MIN_IMPORTANCE", "2"))
+# 2 → 4 (2026-08-10): 2는 사실상 전량 통과였다. 저널 793개 중 613개(77%)가
+# 한 번도 회상되지 않은 채 망각 임계를 넘겼다 — 쓸 때 이미 안 찾을 것이었다는
+# 뜻이다. 4 이하를 버리면 rubric상 "5 = 이 프로젝트 안에서 세션을 넘어 쓸모
+# 있다" 이상만 남는다. 점수 누락 시 기본값 5는 그대로 통과(fail-open 유지).
+# 2026-08-28 임시 상향 (4 → 5, 즉 저장 하한이 5점에서 6점으로).
+# 근거: 최근 9주 실측에서 유입 주 190개 대 처리 주 95개로 **주당 95개 적자**였고,
+# 처리량은 161→79→39 로 반토막 나는 추세였다. 동시에 저널 851개 중 822개(96.6%)가
+# 한 번도 회상되지 않았다 — 거의 쓰이지 않는 것을 하루 27개씩 만들며 그 처리에
+# 주간 예산을 태우던 상태다. 5점 구간이 분포의 약 31%라 유입이 주 190 → 약 130 으로
+# 내려간다. **임시값이다**: Knowledge 사용 측정이 2026-08-28 에 시작됐으므로
+# 2주치(9월 중순)가 쌓이면 "실제로 쓰인 지식이 어느 점수대에서 나왔는가"를 보고
+# 근거 있게 재조정한다. 되돌리려면 이 값을 4로 되돌리거나 환경변수로 덮는다.
+MIN_IMPORTANCE = int(os.environ.get("CLAUDE_DISTILL_MIN_IMPORTANCE", "5"))
+# 근접 중복 임계 (2026-08-10). 제목 벡터 코사인이 이 값 이상이면 새 조각을
+# 쓰지 않고 원본을 회상 처리한다. 0.82는 "같은 말을 다르게 쓴 것"과 "옆 주제"가
+# 갈리는 지점 — 낮추면 별개 사실이 묻히고, 높이면 재기록이 그대로 통과한다.
+DEDUP_COS = float(os.environ.get("CLAUDE_DISTILL_DEDUP_COS", "0.82"))
 MAX_TURNS_INCLUDED = int(os.environ.get("CLAUDE_DISTILL_MAX_TURNS", "120"))
 MAX_CHARS_PER_TURN = int(os.environ.get("CLAUDE_DISTILL_MAX_CHARS_PER_TURN", "2000"))
 TIMEOUT_SEC = int(os.environ.get("CLAUDE_DISTILL_TIMEOUT", "180"))
@@ -145,6 +193,11 @@ def extract_text(message: dict) -> str:
     return safe_str(content)
 
 
+# brain-recall-inject.py가 프롬프트마다 넣는 블록. 이미 brain에 있는 문서의 제목이라
+# 증류하면 같은 기억이 새 일지로 다시 저장된다 — 증류 전에 지운다 (2026-09-28).
+_RECALL_BLOCK_RE = re.compile(r"<(brain-recall)>.*?</\1>\s*", re.S)
+
+
 def load_turns(transcript_path: Path):
     turns = []
     with transcript_path.open("r", encoding="utf-8") as f:
@@ -161,7 +214,7 @@ def load_turns(transcript_path: Path):
                 continue
             msg = d.get("message") or {}
             role = msg.get("role", t)
-            text = extract_text(msg).strip()
+            text = _RECALL_BLOCK_RE.sub("", extract_text(msg)).strip()
             if not text:
                 continue
             ts = d.get("timestamp", "")
@@ -237,6 +290,10 @@ Strict rules:
 - decisions = lasting choices (architecture, tool selection, structural direction) with WHY.
 - mistakes = errors that occurred AND were diagnosed/fixed. Include root cause + fix.
 - patterns = generalizable approaches/snippets/workflows applicable beyond this one session.
+- For mistakes and patterns: do NOT quote who pointed out what (no "the user said/pointed out ...",
+  no quoted remarks, no names). Write the rule to follow next time and the situation in which it
+  applies. These notes are internal; quoting the incident lets it leak into material other people
+  read (2026-11-01 user rule).
 - If the session was trivial (greetings, single status check, no real work), set skip=true with all arrays empty.
 - importance: rate each item 1-10. 1 = mundane fact only valid for this exact
   project/session (e.g. a one-off path, a trivial rename); 5 = useful within
@@ -366,10 +423,107 @@ def slugify(s: str, fallback: str = "untitled") -> str:
     return s[:60] or fallback
 
 
+class _DedupIndex:
+    """기존 활성 저널의 제목 벡터 — 닮은 노트는 새로 쓰지 않고 회상으로 돌린다.
+
+    같은 날·같은 슬러그는 write_notes가 이미 막지만, **같은 내용을 다른 날
+    다른 표현으로** 쓰면 그대로 새 파일이 됐다 (stop-hook.md §Known issues의
+    "Naming dedup is collision-suffix only, not similarity-based"). 저널이
+    불어난 주된 경로다 — 2026-08-07 통합 때 132조각 대부분이 이미 있는 내용의
+    재기록이었다.
+
+    검색 인덱스에 제목 벡터(chunk_idx 0)가 이미 있으니 추가 비용은 새 제목
+    임베딩뿐이다. 인덱스나 ML 스택이 없는 기기에서는 조용히 비활성 —
+    dedup을 못 하는 것이 기록을 잃는 것보다 낫다 (fail-open).
+    """
+
+    def __init__(self):
+        self.vecs: dict[str, list[float]] = {}
+        self._embed = None
+        try:
+            import math
+            import struct
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from _brain_lib import open_db, embed_one, EMBED_DIM  # noqa
+            conn = open_db(create=False)
+            rows = conn.execute(
+                """SELECT c.file_path, c.id FROM chunks c
+                   JOIN files f ON f.path = c.file_path
+                   WHERE c.chunk_idx = 0
+                     AND f.category IN ('Decisions','Mistakes','Patterns')"""
+            ).fetchall()
+            for fp, cid in rows:
+                if "archived" in fp.replace("\\", "/").split("/"):
+                    continue
+                r = conn.execute(
+                    "SELECT embedding FROM chunks_vec WHERE rowid = ?",
+                    (cid,)).fetchone()
+                if not (r and r[0]):
+                    continue
+                v = struct.unpack(f"{EMBED_DIM}f", r[0])
+                n = math.sqrt(sum(x * x for x in v)) or 1.0
+                self.vecs[fp] = [x / n for x in v]
+            self._embed = embed_one
+        except Exception as e:
+            log(f"dedup: disabled ({e!r})")
+
+    def match(self, title: str):
+        """제목이 기존 저널과 DEDUP_COS 이상 닮으면 (경로, 유사도)."""
+        if not (self._embed and self.vecs):
+            return None
+        try:
+            import math
+            q = self._embed(title)
+            n = math.sqrt(sum(x * x for x in q)) or 1.0
+            q = [x / n for x in q]
+            best, score = None, 0.0
+            for fp, v in self.vecs.items():
+                s = sum(a * b for a, b in zip(q, v))
+                if s > score:
+                    best, score = fp, s
+            return (best, score) if score >= DEDUP_COS else None
+        except Exception as e:
+            log(f"dedup: lookup failed ({e!r})")
+            return None
+
+
+def _bump_recall(rel_path: str) -> bool:
+    """중복이라 안 쓴 대신, 원본을 회상 처리한다 (strength+1 → 감쇠가 늦어짐).
+
+    brain-search의 write-back과 같은 계약. 새 조각을 만들지 않으면서 "이 주제가
+    또 나왔다"는 사실은 남긴다 — 안 그러면 반복되는 주제가 오히려 빨리 잊힌다.
+    """
+    try:
+        # 인덱스의 file_path는 vault 기준 상대경로다 ("Decisions\\2026-…md").
+        p = Path(rel_path) if Path(rel_path).is_absolute() \
+            else VAULT_ROOT / rel_path
+        if not p.exists():
+            return False
+        txt = p.read_text(encoding="utf-8")
+        today = datetime.now().strftime("%Y-%m-%d")
+        # recall_count는 올리지 않는다 (2026-09-28) — 같은 주제가 다시 나온 것은
+        # "읽혔다"가 아니다. 회상 수는 brain-recall-read.py가 실제 읽기로만 센다.
+        # strength/last_recalled는 그대로 올려 반복 주제가 빨리 잊히지 않게 한다.
+        for key in ("strength",):
+            m = re.search(rf"^({key}:\s*)(\d+)\s*$", txt, re.M)
+            if m:
+                txt = txt[:m.start()] + f"{m.group(1)}{int(m.group(2)) + 1}" \
+                    + txt[m.end():]
+        m = re.search(r"^(last_recalled:\s*)('?)[0-9-]+\2\s*$", txt, re.M)
+        if m:
+            txt = txt[:m.start()] + f"{m.group(1)}{today}" + txt[m.end():]
+        p.write_text(txt, encoding="utf-8")
+        return True
+    except Exception as e:
+        log(f"dedup: recall bump failed for {rel_path} ({e!r})")
+        return False
+
+
 def write_notes(distilled: dict, session_id: str, cwd: str) -> list[str]:
     date = datetime.now().strftime("%Y-%m-%d")
     written: list[str] = []
     dropped = 0
+    dedup = _DedupIndex()
     for category in ("decisions", "mistakes", "patterns"):
         items = distilled.get(category) or []
         if not items:
@@ -397,11 +551,23 @@ def write_notes(distilled: dict, session_id: str, cwd: str) -> list[str]:
             slug = slugify(title)
             fname = f"{date}-{slug}.md"
             fpath = folder / fname
-            # avoid overwriting same-day duplicates
-            i = 2
-            while fpath.exists():
-                fpath = folder / f"{date}-{slug}-{i}.md"
-                i += 1
+            # Same date + same slug means the running session was summarised
+            # again and produced the same note. Suffixing it (-2, -3 …) piled up
+            # near-identical files, so skip instead (2026-08-03).
+            if fpath.exists():
+                dropped += 1
+                log(f"session {session_id[:8]}: duplicate note skipped '{fname}'")
+                continue
+            # Near-duplicate gate (2026-08-10): 같은 주제를 다른 날 다시 쓰면
+            # 새 조각 대신 원본을 회상 처리한다.
+            hit = dedup.match(title)
+            if hit:
+                dropped += 1
+                bumped = _bump_recall(hit[0])
+                log(f"session {session_id[:8]}: near-duplicate of {hit[0]} "
+                    f"(cos {hit[1]:.2f}) — skipped '{title[:50]}'"
+                    f"{'' if bumped else ' (recall bump failed)'}")
+                continue
             tags = item.get("tags") or []
             tags_yaml = "\n".join(f"  - {t}" for t in tags) if tags else ""
             # strength/recall_count/last_recalled seed the P2 decay model
@@ -460,7 +626,9 @@ def _respawn_detached(raw: str, session_id: str) -> bool:
     try:
         tmp_dir = Path(os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp")
         pf = tmp_dir / f"distill-payload-{session_id[:8]}-{os.getpid()}.json"
-        pf.write_text(raw, encoding="utf-8")
+        # bytes, so a surrogate that slipped through can never kill the
+        # detach itself (see the stdin note in main()).
+        pf.write_bytes(raw.encode("utf-8", errors="replace"))
         env = os.environ.copy()
         env["CLAUDE_DISTILL_DETACHED"] = "1"
         env["CLAUDE_DISTILL_PAYLOAD_FILE"] = str(pf)
@@ -496,8 +664,19 @@ def main() -> None:
 
     # 1. read the hook payload. This must happen before any re-exec: stdin is the
     # hook runner's pipe and does not survive one.
+    # stdin is read as bytes and decoded as UTF-8 explicitly. On Windows the
+    # text-mode sys.stdin decodes with the locale codec (cp949 here) while the
+    # hook runner sends UTF-8, so a Korean cwd arrives as lone surrogates
+    # (\udcXX). _respawn_detached then tried to write that string back out as
+    # UTF-8 and died with UnicodeEncodeError("surrogates not allowed"), taking
+    # the whole detach with it -- 3 failures in the log, all Korean paths
+    # (2026-08-12/13/20). Postmortem: _System/health.md 2026-08-20.
     try:
-        raw = sys.stdin.read()
+        _buf = getattr(sys.stdin, "buffer", None)
+        if _buf is not None:
+            raw = _buf.read().decode("utf-8", errors="replace")
+        else:
+            raw = sys.stdin.read()
     except Exception as e:
         log(f"stdin read failed: {e!r}")
         return
@@ -542,6 +721,16 @@ def main() -> None:
         log(f"skip: only {len(turns)} turns (<{MIN_TURNS}) session {session_id[:8]}")
         return
 
+    # Incremental guard — a repeated Stop-hook firing is skipped unless the session
+    # grew enough since last time. Everything else always proceeds (see MIN_TURN_DELTA).
+    state = _load_state()
+    last_turns = int(state.get(session_id, 0))
+    from_stop_hook = payload.get("hook_event_name") == "Stop"
+    if from_stop_hook and not FORCE_RUN and (len(turns) - last_turns) < MIN_TURN_DELTA:
+        log(f"skip: only +{len(turns) - last_turns} turns since last distill "
+            f"(<{MIN_TURN_DELTA}) session {session_id[:8]}")
+        return
+
     # 3. build prompt
     transcript_block = build_transcript_block(turns)
     prompt = DISTILL_PROMPT_TEMPLATE.format(
@@ -565,6 +754,11 @@ def main() -> None:
     # 5. write notes
     written = write_notes(distilled, session_id, cwd)
     log(f"session {session_id[:8]}: wrote {len(written)} note(s): {written}")
+
+    # Mark how far this session has been distilled so the incremental guard
+    # above can skip the next few Stop-hook firings.
+    state[session_id] = len(turns)
+    _save_state(state)
 
     # 6. fire-and-forget reindex of brain-search if at least one note was written.
     # Freshness contract: _System/search.md. Failures here MUST

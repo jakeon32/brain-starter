@@ -2,7 +2,7 @@
 title: brain-health — pipeline self-monitoring + auto-catalogs
 type: spec
 status: confirmed
-updated: 2026-07-16
+updated: 2026-10-29
 ---
 
 # brain-health — the pipeline watches itself
@@ -46,7 +46,12 @@ session context; silence keeps healthy sessions clean). Checks:
 | search index staleness | newest brain `.md` is > 24h newer than `brain-index.sqlite` |
 | consolidate receipt | newest `_System/audit/consolidate-*.md` is > 9 days old (weekly schedule regressed — task runs only while logged in), **or** (added 2026-07-03) no receipt has *ever* been written and the journal already has ≥15 files (weekly schedule was never set up on this device — the installer prints the setup command but does not run it) |
 | Memory staleness | `Memory/*.md` untouched > 60 days (reference facts drifting) |
-| resume bloat | Any `Memory/resume/<project>.md` > 8KB, or the `Memory/session-resume.md` index > 8KB / > 6 `##` sections. **Restructured 2026-07-29**: the old single combined file had size = project count × section size, so it blew past its cap every 2–3 weeks no matter how faithfully the overwrite rule was followed (132KB 6/12 · 49KB 7/2 · 62KB 7/15 · 68KB 7/29 — four slims). Per-project files let the warning **name the offending file**, so a session that doesn't own it can skip; an always-on warning trains you to skim past the block that carries the real ones. A fat state file almost always means reusable knowledge that belongs in `Knowledge/` with only a `[[link]]` left behind. Coming from the old single-file layout? `_System/migrate-resume-split.py` splits it (dry-run by default, `--apply` to write). |
+| resume bloat | Any `Memory/resume/<project>.md` > 5,000 characters, or the `Memory/session-resume.md` index > 5,500 characters / > 6 `##` sections (measured in characters, not bytes, since 2026-08-13 — Korean text is 3 bytes a character, so a byte cap punished it 3x). **Restructured 2026-07-29**: the old single combined file had size = project count × section size, so it blew past its cap every 2–3 weeks no matter how faithfully the overwrite rule was followed (132KB 6/12 · 49KB 7/2 · 62KB 7/15 · 68KB 7/29 — four slims). Per-project files let the warning **name the offending file**, so a session that doesn't own it can skip; an always-on warning trains you to skim past the block that carries the real ones. A fat state file almost always means reusable knowledge that belongs in `Knowledge/` with only a `[[link]]` left behind. Coming from the old single-file layout? `_System/migrate-resume-split.py` splits it (dry-run by default, `--apply` to write). |
+| hook deployment drift | any `_System/hooks/*.py` differs bytewise from its `~/.claude/hooks/` counterpart (override the deployment dir with `BRAIN_HOOKS_DIR`). Added 2026-08-10 — `git pull` ships the source of truth but **deploys nothing**; only the installer does. A device ran three-week-old builds, so a dedup guard written 2026-08-03 never once executed. **Runs after `check_shared_sync`** — that pull is what updates the canonical hooks, so this ordering catches the drift in the same session that created it. See postmortem below. |
+| recall wiring | the recall hooks (`brain-recall-inject.py`, `brain-recall-read.py`) are missing from `settings.json`, the launcher points at a vault path that no longer exists, or there were zero injections in the last 3 days while recall is wired. Added 2026-10-09 — see postmortem below. |
+| stale git lock | `.git/index.lock` older than 10 minutes. A git killed mid-commit leaves it behind and every later `brain-sync` commit fails silently (2026-10: a week of failed sync commits before anyone noticed). |
+| orphan sessions | a `claude` process listed under `~/.claude/sessions/` whose parent (the terminal) is gone — the window was closed but the process and its MCP children live on, and nobody can `/exit` it. Added 2026-08-30 after sessions sat idle for a day and one for six days. Prints the `taskkill /T` / `kill` line to clean up. |
+| consolidate paused on purpose | `_System/audit/consolidate-paused.md` exists without `status: resolved` — then the receipt-age warning is suppressed (an intentional pause is not a failure), and only a pause older than 30 days is raised as "review the resume condition". |
 | _index.md catalog drift | a tracked `_index.md` carries > 5 hand-written list-item `.md` links — file listings are `brain-catalog.py`'s job, not hand-maintenance. Added 2026-06-24 after `Knowledge/_index.md` silently regrew 21 hand-written links despite the catalog automation (git diff only surfaces this at commit time; runtime sessions rarely commit the skeleton). The `_catalog.md`/`_index.md` pointers are excluded so curated prose links don't false-positive. **2026-06-30: the regrowth was NOT hand-written — root cause was `consolidate.py`'s `index_add()` auto-append (now removed). See postmortem below.** |
 
 Side effect: spawns **detached** `distill-catchup.py` (recover missed
@@ -77,7 +82,7 @@ schtasks /create /tn brain-watchdog /sc daily /st 09:00 /tr "%USERPROFILE%\.clau
 | Check | Warns when |
 |---|---|
 | hook registration | `settings.json` lost its `brain-health`/`distill-session` entry, or a command regressed to single-slash `cmd /c` (the literal 2026-07-15 bug), **or the `//c` path arrives unquoted** (the same-day sequel — sh eats the backslashes, cmd gets `C:UsersUSER...`, exits 0, fails just as silently). Inline commands like the canary (`cmd //c "echo ..."`) are not flagged |
-| sessions ran, hooks left no trace | a **finished** session (transcript untouched > 30 min) is newer than `max(canary, distill.log)` + 2h. Not "no distills lately" — going days without a session is normal and a warning that cries wolf gets ignored |
+| sessions ran, hooks left no trace | a **finished** session (transcript untouched > 30 min **and not owned by a live `claude` process** — idle is not ended; added 2026-08-12 after five consecutive hourly false alarms from a session left open overnight) is newer than `max(canary, distill.log)` + 2h. Not "no distills lately" — going days without a session is normal and a warning that cries wolf gets ignored |
 | device hooks vs tracked source | any `_System/hooks/*.py` differs from `~/.claude/hooks/` |
 
 Notifies by **Windows toast** (WinRT via powershell): no token, no network, so
@@ -517,3 +522,74 @@ distill, distill was fixed, and the pipeline was reported healthy — while an
 identical victim sat two lines below it in the same `settings.json`. The user
 asking "is this on the remote?" is what surfaced it; nothing in the pipeline
 did.
+
+## 2026-08-10 postmortem — the repo held the fix; the device ran the old code
+
+한 줄 요약: `git pull`은 훅을 배포하지 않는다. 정본과 배포본이 3주 갈라져 있었고, 그것을 보는 점검은 **있었지만 아무에게도 닿지 않았다.**
+
+`_System/hooks/` is what git carries; `~/.claude/hooks/` is what actually runs.
+Only the installer copies between them. A device ran a three-week-old
+`brain-sync.py`, so a dedup guard committed 2026-08-03 had **never executed
+once**. Twelve of thirteen hooks happened to match, which is exactly why nobody
+noticed: drift is per-file, and one stale file is invisible next to twelve fresh
+ones.
+
+The watchdog already compared source to deployment — but `toast()` was
+Windows-only, so on macOS every warning ended in `toast=FAILED` and died in
+`watchdog.log`. Two fixes, only one of them a new check:
+
+- the watchdog's **delivery channel** was broken on that platform; `toast()` now
+  branches to `osascript` on darwin
+- `brain-health.check_hook_drift` carries the same comparison through the channel
+  that is guaranteed to be read — session-start output. A watchdog you never see
+  and a health check you always see are not redundant.
+
+Two bugs were found while verifying, both in `brain-sync.py` code written the
+same day: `--dry-run` rewrote `Knowledge/_index.md` (it now stages into a
+throwaway `GIT_INDEX_FILE` and writes nothing), and the generated shared listing
+flipped one line between devices because it used the disk's spelling of a
+folder on a case-insensitive filesystem (it now normalizes through
+`git ls-files`).
+
+**Lesson.** "Committed" and "running" are different claims about different
+files. Every fix in `_System/hooks/` is inert until a device runs the installer.
+
+## 2026-08-20 postmortem — the fallback that only started
+
+Three separate distill defects surfaced from one read of `distill.log`. None had
+raised a user-visible error.
+
+- **The inline fallback started and never finished.** `detach failed …; running
+  inline` → `distilling session … (429 turns)` → nothing. No `wrote N note(s)`
+  line ever appeared; that session's notes are simply absent. **A log line that
+  announces an attempt is not evidence of an outcome** — health checks on this
+  path must key on `wrote`, not on `distilling`.
+- **Every detach failure had a non-ASCII (Korean) `cwd`.** On Windows the
+  text-mode `sys.stdin` decodes with the locale codec (cp949) while the hook
+  runner sends UTF-8, so the path arrived as lone surrogates and re-encoding the
+  payload for the detached worker raised `UnicodeEncodeError` — 3 failures out of
+  3. Fixed in `distill-session.py`: stdin is read as bytes and decoded as UTF-8
+  explicitly, and the payload file is written as bytes.
+- **The catchup "mismatch" is not a regex bug.** `skip: only +N turns since last
+  distill` comes from the incremental guard and means "not grown enough *yet*" —
+  a temporary state. Teaching `OUTCOME_RE` to treat it as terminal would retire
+  the session from the catchup net permanently. If those spawns ever need to go,
+  catchup should read the same state file and filter candidates dynamically.
+
+> **Skeleton note.** The incremental guard exists for devices that also wire the
+> per-reply `Stop` hook. In this skeleton it applies only to payloads whose
+> `hook_event_name` is `Stop`; SessionEnd, catchup and hand runs always proceed,
+> so a session shorter than `CLAUDE_DISTILL_MIN_TURN_DELTA` is still distilled.
+
+## 2026-10-09 postmortem — recall loop dead for 11 days
+
+`brain-recall-inject.py` / `brain-recall-read.py` were deployed but never wired
+into `settings.json`, and the hook launcher still pointed at the vault's
+pre-move path. Injections and reads were zero for 11 days; the only warning
+shown every session was "deployed copy differs", which was true but not the
+cause. Re-running the installer wired both hooks.
+
+`check_recall_wiring` in `brain-health.py` now measures whether recall actually
+runs, not whether files exist: ① both recall hooks present in `settings.json`
+② the launcher's vault path exists ③ at least one injection in the last 3 days
+(`brain-usage.sqlite` table `injections`).

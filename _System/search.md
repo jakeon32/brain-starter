@@ -2,7 +2,7 @@
 title: brain — Semantic search index (P1)
 type: spec
 status: confirmed
-updated: 2026-07-03
+updated: 2026-09-28
 ---
 
 # brain — Semantic search index
@@ -235,6 +235,20 @@ python ~/.claude/hooks/brain-reindex.py --stats
 ```
 
 Verifies that `chunks`, `chunks_fts`, and `chunks_vec` row counts match (any mismatch = corrupted index, do `--full`).
+
+**The mismatch size does not measure the damage.** 2026-08-13: `--stats` reported `vec 6095` against `chunks/fts 6005` — a 90-row overhang. The `--full` rebuild returned the same file count but 144 fewer chunks, not 90: incremental indexing had also left dead rows in `chunks`/`chunks_fts` for files later edited or deleted, and only the vector table's surplus was visible to the row-count check. Treat any `OUT OF SYNC` as "incremental has been accumulating residue", and verify with a real query after the rebuild, not by the counts alone.
+
+### Fast presence check (`--fast`, 2026-08-28)
+
+```sh
+python ~/.claude/hooks/brain-search.py "what I am about to do" --fast
+```
+
+BM25 only — no embedding model, no pre-query reindex — about 0.1 s instead of ~13 s (model import + load dominate; the lookup itself is ~30 ms). It answers "is there anything on this?" before starting a piece of work; when it hits, re-run without `--fast` for the semantic neighbours. `brain-recall-inject.py` uses the same path on every prompt.
+
+### Exposure vs recall (2026-09-28)
+
+A returned hit is logged as **exposure** in `~/.claude/data/brain-usage.sqlite` (table `usage`; only a truncated query hash is stored, never the text). It no longer bumps `recall_count` — a recall is an actual read, counted by `brain-recall-read.py` ([`decay.md`](decay.md)). `--no-touch` skips the exposure log.
 
 ## Validation suite
 

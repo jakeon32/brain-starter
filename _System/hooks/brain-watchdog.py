@@ -70,7 +70,11 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# A session transcript untouched this long is treated as ended, not in-progress.
+# A session transcript untouched this long is treated as ended, not in-progress
+# -- UNLESS a live claude process still owns it (see live_transcripts). Idle is
+# not ended: 2026-08-12 a session left open across two days sat untouched for
+# hours at a time, was counted as "finished", and produced five consecutive
+# hourly false alarms. A warning that is always on is a warning nobody reads.
 SETTLE_S = 30 * 60
 # Allowance between a session ending and the canary line landing.
 GRACE_S = 2 * 3600
@@ -82,7 +86,14 @@ PROJECTS = CLAUDE_DIR / "projects"
 HOOKS_LIVE = CLAUDE_DIR / "hooks"
 LOG = CLAUDE_DIR / "logs" / "watchdog.log"
 DISTILL_LOG = CLAUDE_DIR / "logs" / "distill.log"
-CANARY = Path(r"C:\tmp\sessionend-canary.log")
+# 2026-08-10: 이 경로가 Windows 하드코딩이라 macOS 에서는 canary가 **구조적으로**
+# 존재할 수 없었다. 아래 trace 판정이 distill.log 한쪽 다리로만 서 있었다는 뜻이다
+# (모듈 docstring이 "둘 다 필요하다"고 적어둔 바로 그 판정). 이제 모든 OS에서
+# 같은 home 기준 경로를 쓴다 — 두 설치기가 이 경로로 canary 를 등록한다.
+CANARY = Path(os.environ.get(
+    "BRAIN_CANARY",
+    str(Path.home() / ".claude" / "logs" / "sessionend-canary.log"),
+))
 
 
 def resolve_brain() -> Path:
@@ -163,12 +174,120 @@ def check_hook_registration(warn: list) -> None:
                     )
 
 
-def check_sessions_vs_hook_trace(warn: list) -> None:
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+# 세션 프로세스가 아닌 claude 바이너리 용도들 — 이것들은 트랜스크립트를 갖지 않는다.
+_NOT_A_SESSION = ("--chrome-native-host", "mcp-server", "--chrome-devtools")
+
+
+def _claude_procs() -> list[tuple[str, str]] | None:
+    """살아 있는 claude 프로세스의 (pid, cmdline). 못 구하면 None."""
+    try:
+        if os.name == "nt":
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name like 'claude%'\" | "
+                  "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True, text=True, timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            sep = "\t"
+        else:
+            proc = subprocess.run(["ps", "-eo", "pid=,command="],
+                                  capture_output=True, text=True, timeout=20)
+            sep = None
+        if proc.returncode != 0:
+            return None
+    except Exception:
+        return None
+
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid, _, cmd = line.partition(sep) if sep else line.partition(" ")
+        cmd = cmd.strip()
+        if not pid.strip().isdigit() or not cmd:
+            continue
+        head = cmd.split()[0]
+        looks_like_cli = (
+            Path(head).name in ("claude", "claude.exe")
+            or "/claude/versions/" in head or "\\claude\\versions\\" in head
+        )
+        if not looks_like_cli or any(x in cmd for x in _NOT_A_SESSION):
+            continue
+        out.append((pid.strip(), cmd))
+    return out
+
+
+def _proc_cwd(pid: str) -> Path | None:
+    """POSIX만. Windows는 프로세스 cwd를 싸게 얻을 방법이 없어 None."""
+    if os.name == "nt":
+        return None
+    linux = Path("/proc") / pid / "cwd"
+    try:
+        if linux.exists():
+            return Path(os.readlink(linux))
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                              capture_output=True, text=True, timeout=15)
+        for line in proc.stdout.splitlines():
+            if line.startswith("n"):
+                return Path(line[1:])
+    except Exception:
+        pass
+    return None
+
+
+def live_transcripts() -> set[Path] | None:
+    """지금 열려 있는 세션의 트랜스크립트 경로. 판별 실패는 None.
+
+    **왜 파일만으로는 안 되는가** (2026-08-12 실측): 트랜스크립트는 턴마다 열고
+    닫혀서 `lsof`에 잡히지 않고, 마지막 레코드 타입도 종료 여부를 말해주지 않는다
+    (같은 날 표본: 종료된 세션이 `last-prompt`·`file-history-snapshot`, 살아 있는
+    세션이 `user`). 남는 신호는 프로세스뿐이다.
+
+    두 경로로 잡는다 —
+      1. `--resume <uuid>` 는 커맨드라인에 세션 ID가 그대로 있다. 정확하다.
+      2. 새로 연 세션은 ID가 안 드러난다(실측: `claude --channels …`). 그래서
+         프로세스의 cwd → 프로젝트 폴더로 환산하고, **그 폴더에서 가장 최근
+         트랜스크립트**를 그 세션의 것으로 본다.
+
+    None을 돌려주면 호출부는 억제하지 않는다 — 오탐 하나보다 미탐 하나가 비싸다.
+    """
+    procs = _claude_procs()
+    if procs is None:
+        return None
+    live: set[Path] = set()
+    for pid, cmd in procs:
+        for uuid in _UUID_RE.findall(cmd):
+            for hit in PROJECTS.glob(f"*/{uuid}.jsonl"):
+                live.add(hit)
+        cwd = _proc_cwd(pid)
+        if cwd is None:
+            continue
+        folder = PROJECTS / str(cwd).replace("/", "-").replace("\\", "-")
+        if not folder.is_dir():
+            continue
+        newest = max(folder.glob("*.jsonl"),
+                     key=lambda f: f.stat().st_mtime, default=None)
+        if newest:
+            live.add(newest)
+    return live
+
+
+def check_sessions_vs_hook_trace(warn: list, stats: dict) -> None:
     if not PROJECTS.exists():
         return
     now = time.time()
+    live = live_transcripts()
+    stats["live"] = len(live) if live is not None else -1
     newest_finished = 0.0
     for p in PROJECTS.glob("*/*.jsonl"):
+        if live and p in live:
+            continue  # 유휴일 뿐 살아 있다 — 아직 SessionEnd가 올 차례가 아니다
         try:
             m = p.stat().st_mtime
         except OSError:
@@ -219,7 +338,25 @@ def esc(s: str) -> str:
     )
 
 
+def _notify_mac(lines: list) -> bool:
+    """macOS 알림 센터. 2026-08-10: 이 감시자는 Windows 토스트만 쏠 줄 알아서
+    macOS 에서는 `toast=FAILED`로 조용히 끝났다 — 08-09에 다섯 시간 연속 경고가
+    로그에만 쌓이고 사람에게는 한 번도 닿지 않았다. **감시자가 알리지 못하면
+    감시하지 않는 것과 같다.**"""
+    body = "\n".join(f"- {w}" for w in lines)[:400].replace('"', "'").replace("\\", "")
+    script = (f'display notification "{body}" '
+              f'with title "brain 파이프라인 이상" sound name "Basso"')
+    try:
+        p = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=30)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
 def toast(lines: list) -> bool:
+    if sys.platform == "darwin":
+        return _notify_mac(lines)
     body = esc("\n".join(f"- {w}" for w in lines))[:900]
     xml = (
         '<toast scenario="reminder"><visual><binding template="ToastGeneric">'
@@ -253,19 +390,25 @@ $t = New-Object Windows.UI.Notifications.ToastNotification $x
 def main() -> None:
     brain = resolve_brain()
     warn: list = []
+    stats: dict = {}
     try:
         check_hook_registration(warn)
-        check_sessions_vs_hook_trace(warn)
+        check_sessions_vs_hook_trace(warn, stats)
         check_hook_drift(warn, brain)
     except Exception as e:  # a broken check must not silence the whole watchdog
         warn.append(f"watchdog 점검 중 예외: {e!r}")
 
+    # 살아 있다고 판정해 제외한 세션 수를 남긴다 — 억제가 맞았는지 사후에
+    # 따질 수 있어야 한다. -1은 "프로세스를 못 읽어 억제하지 않았다".
+    live = stats.get("live")
+    suffix = "" if live in (0, None) else f" [live={live}]"
+
     if not warn:
-        log("ok")
+        log("ok" + suffix)
         return
 
     shown = toast(warn)
-    log(f"WARN({len(warn)}) toast={'shown' if shown else 'FAILED'} :: " + " | ".join(warn))
+    log(f"WARN({len(warn)}) toast={'shown' if shown else 'FAILED'}{suffix} :: " + " | ".join(warn))
     # stdout matters only when run by hand; Task Scheduler discards it.
     print("[brain-watchdog] 경고:")
     for w in warn:

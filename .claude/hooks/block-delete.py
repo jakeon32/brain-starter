@@ -18,6 +18,26 @@ narrowed from "block everywhere" (multi-person repo, needs a hard stop
 against anyone's mistake) to "block two folders" (single-user repo, the
 risk is narrower now that a subset of content propagates).
 
+Scope is judged **per command segment**, not over the whole string
+(2026-08-08). Before that, any `rm` anywhere in the string plus the word
+`Knowledge/` anywhere else was enough to block -- so
+
+    cd <vault>; python3 - <<'PY' ... "Knowledge/_index.md" ... PY
+    rm -f _System/audit/consolidate-queue.json
+
+was refused, though the only delete targeted `_System/audit/`. Same class of
+false positive the brain-guard marker check had: mentioning a path is not
+operating on it. Splitting on `;`, `&&`, `||` and newlines fixes it.
+
+**Pipes are deliberately NOT split** -- data flows across them, so the left
+side is the right side's argument list. `ls Knowledge/ | xargs rm` has to
+stay blocked, and it does.
+
+Heredoc bodies still count as segments. Stripping them would miss the case
+where the heredoc *is* the script (`bash <<EOF`), so the conservative
+reading stays; write prose containing delete examples to a file and pass it
+by path.
+
 Pure stdlib (json/re/sys) -- deliberately no dependency on jq (not
 installed on this device) or on the pinned-Python310 ML stack (not needed
 here; any python3 on PATH works).
@@ -46,6 +66,9 @@ BROAD_RE = re.compile(
     r'|rm\s+-[a-zA-Z]*r[a-zA-Z]*\s+(\.|\*)(\s|$)'
     r'|find\s+\.\s.*-delete'
 )
+# `;` `&&` `||` 개행으로만 나눈다. 파이프는 남긴다 -- 파이프는 데이터가 흐르므로
+# 왼쪽이 오른쪽의 인자다(`ls Knowledge/ | xargs rm` 은 한 덩어리로 봐야 막힌다).
+SEGMENT_RE = re.compile(r';|&&|\|\||\n')
 
 MESSAGE = """\
 brain 삭제 방지 -- Knowledge/, Memory/ 는 다른 기기와 공유될 수 있는 내용을 담고 있어 삭제를 막습니다.
@@ -66,10 +89,14 @@ def main() -> int:
         return 0
     cmd = (payload.get("tool_input") or {}).get("command") or ""
     if not cmd or not DEL_RE.search(cmd):
-        return 0
-    if SCOPE_RE.search(cmd) or BROAD_RE.search(cmd):
-        print(MESSAGE, file=sys.stderr)
-        return 2
+        return 0  # 삭제 계열이 아예 없으면 볼 것도 없다
+    # 삭제 명령과 보호 경로가 **같은 세그먼트**에 있을 때만 막는다.
+    for seg in SEGMENT_RE.split(cmd):
+        if not DEL_RE.search(seg):
+            continue
+        if SCOPE_RE.search(seg) or BROAD_RE.search(seg):
+            print(MESSAGE, file=sys.stderr)
+            return 2
     return 0
 
 

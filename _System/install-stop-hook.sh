@@ -49,20 +49,11 @@ SETTINGS="$HOME/.claude/settings.json"
 
 # Every pipeline script that must exist device-local for distill / health /
 # search / consolidate / catchup to function — not just the hook entry points.
-HOOK_FILES=(
-  distill-session.py
-  brain-health.py
-  brain-catalog.py
-  brain-reindex.py
-  brain-search.py
-  brain-consolidate.py
-  brain-decay.py
-  brain-sync.py
-  brain-watchdog.py
-  brain-backup.py
-  distill-catchup.py
-  _brain_lib.py
-)
+# 2026-09-01: 하드코딩 목록 대신 «정본 폴더를 그대로 읽는다».
+# 목록 방식은 두 번 샜다 — 훅을 새로 만들 때 설치기까지 고쳐야 하는 구조였고
+# 매번 잊었다. 이제 hooks/*.py 는 있으면 배포된다.
+HOOK_FILES=()
+while IFS= read -r _f; do HOOK_FILES+=("$(basename "$_f")"); done < <(find "$HOOKS_SRC_DIR" -maxdepth 1 -name '*.py' -type f | sort)
 
 say() { printf '%s\n' "$*"; }
 run() { if [[ "$DRY_RUN" == 1 ]]; then say "[dry-run] $*"; else eval "$*"; fi; }
@@ -128,14 +119,29 @@ SYNC_DST="$HOOK_DST_DIR/brain-sync.py"
 DISTILL_CMD="env CLAUDE_DISTILL_VAULT=$BRAIN $DISTILL_DST"
 HEALTH_CMD="env CLAUDE_DISTILL_VAULT=$BRAIN $HEALTH_DST"
 SYNC_CMD="env CLAUDE_DISTILL_VAULT=$BRAIN $SYNC_DST --push"
+# 실제 읽기만 회상으로 센다 (2026-09-28, _System/decay.md §Recall write-back).
+RECALL_CMD="env CLAUDE_DISTILL_VAULT=$BRAIN python3 $HOOK_DST_DIR/brain-recall-read.py"
+# 프롬프트마다 관련 문서 제목을 알린다. brain-search를 불러 쓰므로 ML 스택 인터프리터로.
+INJECT_CMD="env CLAUDE_DISTILL_VAULT=$BRAIN ${ML_PYTHON:-python3} $HOOK_DST_DIR/brain-recall-inject.py"
+# The canary is one line per SessionEnd, written by the shell itself — no Python,
+# no vault, nothing that can break the way the hooks it watches can. brain-watchdog
+# needs it as the second leg of "did the hooks fire": distill.log alone is silent
+# for `claude -p` children by design, and the canary alone counts those children as
+# if they were user sessions. Registering it was a manual step on every device until
+# 2026-08-10, so a device could go without one and the check limped on one leg.
+CANARY_LOG="$HOME/.claude/logs/sessionend-canary.log"
+CANARY_CMD="sh -c 'mkdir -p $HOME/.claude/logs && date +%FT%T%z >> $CANARY_LOG'"
 
 patch_hook() {
-  # $1 = hook_type (SessionEnd|SessionStart), $2 = marker substring, $3 = command
+  # $1 = hook_type (SessionEnd|SessionStart|PostToolUse|UserPromptSubmit),
+  # $2 = marker substring, $3 = command, $4 = matcher (선택. 미지정이면 "" — 종전 동작)
+  #
+  # 2026-08-30: matcher 인자를 더했다. PostToolUse 는 도구 이름으로 걸러야 한다.
   if [[ "$DRY_RUN" == 1 ]]; then
-    say "[dry-run] would ensure settings.json $1 hook command == \"$3\""
+    say "[dry-run] would ensure settings.json $1 hook command == \"$3\"${4:+ (matcher: $4)}"
     return
   fi
-  python3 - "$SETTINGS" "$1" "$2" "$3" <<'PY'
+  HOOK_MATCHER="${4:-}" python3 - "$SETTINGS" "$1" "$2" "$3" <<'PY'
 import json, sys, os
 
 settings_path, hook_type, marker, command = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -149,14 +155,15 @@ else:
 hooks = data.setdefault("hooks", {})
 bucket = hooks.setdefault(hook_type, [])
 
-# Find an existing block with a matcher == "" (the global one), else add.
+# Find an existing block with the target matcher ("" = the global one), else add.
+target_matcher = os.environ.get("HOOK_MATCHER", "")
 block = None
 for b in bucket:
-    if isinstance(b, dict) and b.get("matcher", "") == "":
+    if isinstance(b, dict) and b.get("matcher", "") == target_matcher:
         block = b
         break
 if block is None:
-    block = {"matcher": "", "hooks": []}
+    block = {"matcher": target_matcher, "hooks": []}
     bucket.append(block)
 
 inner = block.setdefault("hooks", [])
@@ -189,6 +196,10 @@ patch_hook "SessionStart" "brain-health.py" "$HEALTH_CMD"
 # scope:shared files existed on this device only — including the one written to
 # stop a rule from being broken a fourth time.
 patch_hook "SessionEnd" "brain-sync.py" "$SYNC_CMD"
+patch_hook "SessionEnd" "sessionend-canary.log" "$CANARY_CMD"
+# brain-recall-read (PostToolUse). Claude 는 Read 만큼 sed/cat 으로도 읽으므로 Bash 포함.
+patch_hook "PostToolUse" "brain-recall-read.py" "$RECALL_CMD" "Read|Bash"
+patch_hook "UserPromptSubmit" "brain-recall-inject.py" "$INJECT_CMD"
 
 # 3. Pin the interpreter that actually has the ML stack, so a bare `python
 #    brain-search.py` typed by a human self-heals instead of dying in whatever

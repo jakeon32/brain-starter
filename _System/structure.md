@@ -2,7 +2,7 @@
 title: brain — Structure
 type: spec
 status: confirmed
-updated: 2026-07-13
+updated: 2026-11-01
 ---
 
 # brain — Structure
@@ -26,6 +26,11 @@ updated: 2026-07-13
 │   ├── search.md                          — hybrid BM25+vector search index (P1)
 │   ├── mcp-config.md                      — why brain doesn't use MCP (direct file access)
 │   ├── session-start-protocol.md          — what Claude reads first on session start
+│   ├── knowledge-model.md                 — know-how vs cautions vs records; optional project know-how books
+│   ├── hooks/                             — the pipeline scripts the installer deploys (every *.py in it)
+│   ├── install-stop-hook.sh / .ps1        — device install, idempotent, --dry-run
+│   ├── block-delete-test.py               — verifies .claude/hooks/block-delete.py (deletes nothing)
+│   ├── recall-ratio.py / recall-replay.py — readouts: how often injected notes are actually opened
 │   └── audit/                             — weekly/monthly audit results (per-device runtime)
 └── .obsidian/                             — Obsidian vault config (mostly ignored)
 ```
@@ -51,7 +56,9 @@ This repo is shared via `git clone` to bootstrap a new device. Anything that def
 | `Knowledge/*.md`, `Knowledge/*/*.md` | ✗ by default, **✓ if `scope: shared`** | Per-device runtime; an explicitly tagged subset propagates (below) |
 | `Agents/*.md` | ✗ | Per-device runtime |
 
-The exact patterns are in `.gitignore` at the repo root — plus `_System/hooks/brain-sync.py`, which force-adds any `Knowledge/*.md`/`Memory/*.md` file whose frontmatter has `scope: shared` regardless of the blanket ignore. Frontmatter field: [`conventions.md`](conventions.md) §Optional fields.
+The exact patterns are in `.gitignore` at the repo root — plus `_System/hooks/brain-sync.py`, which force-adds any file under `Knowledge/`/`Memory/` (**at any depth**, `archived/` excluded — until 2026-08-10 the scanner only globbed the top level, so a shared note in a subfolder never had its edits re-added) whose frontmatter has `scope: shared`, regardless of the blanket ignore.
+
+**The shared listing is generated, not maintained.** `brain-sync.py` rewrites the `<!-- shared-index:auto -->` block inside `Knowledge/_index.md` on every `--pull`/`--push` (the block is appended on the first run). That file is tracked, so it is the one place another device can learn what exists — `_catalog.md` is device-local. Promote/demote via the file's own frontmatter; never edit the block. Frontmatter field: [`conventions.md`](conventions.md) §Optional fields.
 
 **This only benefits a device whose own pipeline is healthy.** `brain-sync.py --pull` runs at SessionStart (via `brain-health.py`) and `--push` runs after weekly `brain-consolidate.py --auto` — a device that never got its weekly schedule set up (see onboarding table in `README.md`) will still *receive* shared content on pull, but won't *contribute* anything back until that's fixed.
 

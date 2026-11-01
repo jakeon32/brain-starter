@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -376,11 +377,21 @@ def auto_reindex() -> tuple[int, int]:
 
 
 def search(query: str, k: int = 5, category: str | None = None,
-           raw_scores: bool = False) -> list[dict]:
+           raw_scores: bool = False, fast: bool = False) -> list[dict]:
+    """fast=True: BM25 only, no embedding model.
+
+    Why it exists: the vector half needs sentence-transformers, and importing
+    plus loading that model costs ~13s on this device while the actual lookup
+    costs 31ms (measured 2026-08-28: import 6.5s, load 6.7s, embed 26ms,
+    FTS 5ms). A 13-second check is one nobody runs mid-task, so the habit
+    never forms and 96% of the corpus stays unread. BM25-only lands at ~0.1s,
+    which is cheap enough to run before starting any piece of work. It is a
+    presence check ("is there anything on this?"), not the full recall — when
+    it hits, re-run without --fast for the semantic neighbours."""
     conn = open_db(create=False)
 
     bm = bm25_search(conn, query, PER_LIST_TOP, category)
-    vc = vec_search(conn, query, PER_LIST_TOP, category)
+    vc = [] if fast else vec_search(conn, query, PER_LIST_TOP, category)
 
     # Nothing matched lexically and nothing sits close in vector space: the
     # corpus has no answer. Say so instead of returning its five nearest
@@ -450,46 +461,46 @@ def search(query: str, k: int = 5, category: str | None = None,
     return out
 
 
-JOURNAL_CATS = {"Decisions", "Mistakes", "Patterns"}
-_FM_INT_RE = {
-    "recall_count": re.compile(r"^(recall_count:\s*)(\d+)\s*$", re.M),
-    "strength": re.compile(r"^(strength:\s*)(\d+)\s*$", re.M),
-}
-_FM_LAST_RE = re.compile(r"^(last_recalled:\s*)('?)[0-9-]+\2\s*$", re.M)
+# Recall write-back moved out of search (2026-09-28): a hit that is only
+# *returned* is exposure, not recall -- it inflated recall_count and gave no
+# baseline for measuring auto-injection. Exposure goes to the usage table
+# below; an actual read is counted by brain-recall-read.py (PostToolUse),
+# which owns the journal frontmatter write-back now. See _System/decay.md.
 
 
-def touch_recall(results: list[dict]) -> None:
-    """P2 decay model write-back: a returned journal hit counts as a recall.
-    strength += 1, recall_count += 1, last_recalled = today (MemoryBank:
-    recalled memories decay slower; t resets). Missing fields are inserted so
-    pre-P1 journals join the model on first recall. Best-effort — a failed
-    touch must never break search."""
-    today = datetime.date.today().isoformat()
-    for r in results:
-        if r.get("category") not in JOURNAL_CATS:
-            continue
-        try:
-            p = Path(r["abs_path"])
-            text = p.read_text(encoding="utf-8")
-            if not text.startswith("---"):
-                continue
-            for key, rx in _FM_INT_RE.items():
-                m = rx.search(text)
-                if m:
-                    text = rx.sub(
-                        lambda mo: f"{mo.group(1)}{int(mo.group(2)) + 1}",
-                        text, count=1)
-                else:
-                    text = text.replace(
-                        "---\n", f"---\n{key}: 1\n", 1)
-            if _FM_LAST_RE.search(text):
-                text = _FM_LAST_RE.sub(rf"\g<1>{today}", text, count=1)
-            else:
-                text = text.replace(
-                    "---\n", f"---\nlast_recalled: {today}\n", 1)
-            p.write_text(text, encoding="utf-8")
-        except Exception:
-            pass
+USAGE_DB = Path.home() / ".claude" / "data" / "brain-usage.sqlite"
+
+
+def record_usage(results: list[dict], query: str) -> None:
+    """Every returned hit is a usage event, Knowledge included.
+
+    Why a side DB instead of frontmatter: Knowledge pages must not be rewritten on recall -- 109 of
+    them are `scope: shared` and a per-device counter would conflict on every
+    sync. The search index is disposable (reindex rebuilds it); usage history
+    is not, so it lives in its own file. Raw queries are never stored, only a
+    truncated hash, so repeated questions can be grouped without keeping text.
+    Best-effort -- a failed write must never break search."""
+    if not results:
+        return
+    try:
+        USAGE_DB.parent.mkdir(parents=True, exist_ok=True)
+        qh = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        con = sqlite3.connect(USAGE_DB)
+        con.execute("""CREATE TABLE IF NOT EXISTS usage(
+            path TEXT NOT NULL, category TEXT, ts TEXT NOT NULL,
+            query_hash TEXT, rank INTEGER, score REAL)""")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_path ON usage(path)")
+        con.executemany(
+            "INSERT INTO usage(path, category, ts, query_hash, rank, score)"
+            " VALUES(?,?,?,?,?,?)",
+            [(r.get("file"), r.get("category"), now, qh, i, r.get("score"))
+             for i, r in enumerate(results, 1)])
+        con.commit()
+        con.close()
+    except Exception:
+        pass
 
 
 def format_human(results: list[dict], query: str) -> str:
@@ -514,11 +525,15 @@ def main() -> int:
     ap.add_argument("query", help="natural-language query")
     ap.add_argument("-k", type=int, default=5, help="top-K (default 5)")
     ap.add_argument("--category", help="restrict to a category folder")
+    ap.add_argument("--fast", action="store_true",
+                    help="BM25 only (~0.1s, no embedding model). Presence "
+                         "check before starting work; rerun without it to "
+                         "get semantic neighbours.")
     ap.add_argument("--json", action="store_true", help="JSON output")
     ap.add_argument("--raw-scores", action="store_true",
                     help="show BM25 + vec ranks in output")
     ap.add_argument("--no-touch", action="store_true",
-                    help="skip recall write-back (strength/last_recalled)")
+                    help="skip exposure logging (usage table)")
     ap.add_argument("--no-reindex", action="store_true",
                     help="skip the incremental reindex done before searching")
     args = ap.parse_args()
@@ -529,7 +544,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    if not args.no_reindex:
+    if not args.no_reindex and not args.fast:
         indexed, deleted = auto_reindex()
         if indexed or deleted:
             # Say so: silence here would look like the note was always indexed,
@@ -537,9 +552,9 @@ def main() -> int:
             print(f"[index refreshed: +{indexed} -{deleted}]", file=sys.stderr)
 
     results = search(args.query, k=args.k, category=args.category,
-                     raw_scores=args.raw_scores)
+                     raw_scores=args.raw_scores, fast=args.fast)
     if not args.no_touch:
-        touch_recall(results)
+        record_usage(results, args.query)
     if args.json:
         print(json.dumps({"query": args.query, "results": results},
                           ensure_ascii=False, indent=2))

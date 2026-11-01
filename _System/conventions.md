@@ -82,6 +82,25 @@ Copying the folder instead defeats that boundary: device-local files (local path
 
 After cloning, the new device fills in its own `Memory/device-<name>.md` first — assets, paths, which Notion workspace it talks to, installed tooling.
 
+## Hooks are edited in the repo, never on the device (2026-08-08)
+
+> **개요 (한국어):** 훅(`_System/hooks/*.py`)은 **저장소 정본만 고친다.** 기기의 `~/.claude/hooks/` 를 직접 고치면 그 개선은 그 기기에만 남고, 다른 기기는 없는 줄도 모른 채 옛 코드로 돈다.
+
+**Edit `_System/hooks/`, commit, then re-run the installer on each device.**
+Never edit `~/.claude/hooks/*.py` directly.
+
+A fix that exists on one device is worse than one that exists nowhere: the docs
+describe it, every device's Claude reads those docs and assumes it is in place,
+and on the other machines nothing changed. The failure is silent by construction.
+`brain-health.py` compares the repo copy with the deployed copy at every session
+start and warns when they differ (§hook deploy drift in `health.md`).
+
+Corollaries:
+- When a device's setup differs, make the difference configurable in the repo
+  copy rather than patching the deployed copy.
+- If the deployed copy and the repo copy disagree, the repo wins — reinstall.
+  Diff them first and salvage anything the device-only version got right.
+
 ## Dates
 
 ISO format only: `YYYY-MM-DD` (e.g. `2026-05-15`). Never `2026/05/15` or `May 15, 2026` in metadata.

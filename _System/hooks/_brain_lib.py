@@ -50,6 +50,8 @@ EMBED_MODEL = os.environ.get(
     "paraphrase-multilingual-MiniLM-L12-v2",
 )
 EMBED_DIM = int(os.environ.get("BRAIN_EMBED_DIM", "384"))
+# See get_model() — CPU on purpose, not for lack of a GPU.
+EMBED_DEVICE = os.environ.get("BRAIN_EMBED_DEVICE", "cpu")
 
 # Folders under brain vault we INDEX (runtime memory only)
 INDEX_FOLDERS = ("Decisions", "Mistakes", "Patterns", "Sessions",
@@ -239,7 +241,19 @@ def get_model():
     if _MODEL is None:
         # Lazy import — saves ~10s on calls that don't need embeddings
         from sentence_transformers import SentenceTransformer
-        _MODEL = SentenceTransformer(EMBED_MODEL)
+        # CPU by default (2026-08-18). sentence-transformers grabs CUDA when it
+        # is available, and on a small (6GB) GPU that puts the embedder in a
+        # fight with whatever else is generating (an image/video pipeline, a
+        # local LLM). Every distill
+        # dedup lookup on 08-17 failed that fight: first
+        # `CUDA out of memory (tried 368MB, 5.01GB free)` at 16:15, then five
+        # `OSError 1455 (paging file too small)` at 23:55 as torch reserved
+        # its CUDA arena. dedup is fail-open, so nothing errored loudly — the
+        # notes were just written with no similarity check, which is exactly
+        # how the same fact ends up in three files. MiniLM-L12/384d is small;
+        # embedding a few dozen titles on CPU costs seconds and cannot lose to
+        # a render. Set BRAIN_EMBED_DEVICE=cuda for a bulk reindex on an idle GPU.
+        _MODEL = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
     return _MODEL
 
 

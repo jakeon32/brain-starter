@@ -203,7 +203,12 @@ def main() -> int:
     if args.dry_run:
         receipt.append(f"- [dry-run] would write {archive}")
         prune(receipt, dry_run=True)
-        write_receipt(receipt, ok=True)
+        # No receipt on a dry run (2026-08-18). The receipt is what brain-health
+        # reads to decide whether a backup happened at all, so writing one here
+        # made a report-only run look like a real archive and silenced the
+        # warning for 8 more days with nothing on disk. `--dry-run` says it
+        # writes nothing; that has to include this. (Same shape as the 2026-07
+        # bug where --dry-run wrote Knowledge/_index.md — see health.md.)
         print("\n".join(receipt))
         return 0
 

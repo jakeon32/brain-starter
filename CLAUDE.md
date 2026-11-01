@@ -42,6 +42,10 @@ powershell -File _System\install-stop-hook.ps1   # Windows
 # hook-behavior regression tests (stdlib only, no test framework installed)
 python _System/hooks/tests/test_distill_detach.py
 python _System/hooks/tests/test_distill_catchup.py
+python _System/hooks/tests/test_brain_recall_inject.py
+python _System/hooks/tests/test_brain_recall_read.py
+python _System/hooks/tests/test_consolidate_update.py
+python _System/block-delete-test.py
 
 # confirm this repo hasn't picked up anything private (also runs in CI)
 python tools/check-purity.py

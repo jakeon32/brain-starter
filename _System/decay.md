@@ -2,7 +2,7 @@
 title: brain-decay — Ebbinghaus forgetting sweep contract
 type: spec
 status: confirmed
-updated: 2026-07-12
+updated: 2026-09-28
 ---
 
 # brain-decay (forgetting / archive lifecycle)
@@ -25,13 +25,32 @@ R = exp(-t / (S × SCALE_DAYS))
   at defaults — long enough for several weekly consolidate passes to converge
   clusterable journals into `Knowledge/` first.
 
-## Recall write-back (brain-search)
+## Recall write-back (brain-recall-read, since 2026-09-28)
 
-Every journal hit returned by `brain-search.py` counts as a recall:
-`strength += 1`, `recall_count += 1`, `last_recalled = today` (frontmatter,
-best-effort, `--no-touch` to skip). Fields missing on pre-P1 journals are
-inserted on first recall. This is what makes frequently-used memories decay
-slower (MemoryBank: recall resets t and grows S).
+A recall is an **actual read**, not a search hit. `brain-recall-read.py`
+(PostToolUse, matcher `Read|Bash`) sees every `.md` path inside the vault that
+Claude opens with Read or names in a Bash command (`sed`/`cat`/`head` reads are
+as common as Read), and counts each file **once per session**:
+
+- journals: `strength += 1`, `recall_count += 1`, `last_recalled = today`
+  (frontmatter; missing fields inserted on first read)
+- every category: a row in `reads` of `~/.claude/data/brain-usage.sqlite`
+  (Knowledge frontmatter is never rewritten — `scope: shared` sync conflicts)
+
+What no longer counts:
+
+| Event | Before 2026-09-28 | Now |
+|---|---|---|
+| `brain-search` returns a hit | recall +1 | exposure only (`usage` table) |
+| distill near-duplicate hit | recall +1, strength +1 | strength +1 only |
+| file read by Claude | not counted | recall +1 (once per session) |
+
+Why: counting exposure made the recall rate unmeasurable — 68/766 journals
+"recalled" could not be told apart from 68 journals that merely ranked in a
+top-k. This is the baseline for measuring auto-injection
+(`brain-recall-inject.py`; readouts: `_System/recall-ratio.py`, `_System/recall-replay.py`). Expect recall counts
+to grow more slowly from here; decay archives slightly more as a result, which
+is reversible. Test: `_System/hooks/tests/test_brain_recall_read.py`.
 
 ## Scheduling
 

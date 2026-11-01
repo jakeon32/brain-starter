@@ -2,7 +2,7 @@
 title: Distillation pipeline — install contract and current reality
 type: spec
 status: confirmed
-updated: 2026-07-16
+updated: 2026-11-01
 ---
 
 # The distillation pipeline — what runs, and how to install it
@@ -72,9 +72,10 @@ For each session that has ≥ `MIN_TURNS` (default 6) turns, the hook:
 
 1. Reads the transcript JSONL.
 2. Calls `claude -p` with a strict JSON schema, model `claude-sonnet-4-6`, effort `low`, no slash commands, no session persistence.
-3. Receives up to 5 items per category (decisions / mistakes / patterns), or `skip: true` if trivial. Each item carries an `importance` score 1-10 (rubric in the prompt: 1 = session-local mundane, 10 = changes all future sessions).
-4. **Importance gate (P1, 2026-07-12)**: items scoring ≤ `MIN_IMPORTANCE` (default 2) are dropped and logged, not written. Missing score fails open to 5. This is the first write-time quality gate against journal volume (~1,500/mo before it).
-5. Writes each surviving item to a new `.md` with frontmatter:
+3. Receives up to 3 items per category (decisions / mistakes / patterns), or `skip: true` if trivial. Each item carries an `importance` score 1-10 (rubric in the prompt: 1 = session-local mundane, 10 = changes all future sessions).
+4. **Importance gate (P1, 2026-07-12)**: items scoring ≤ `MIN_IMPORTANCE` (**default 5** — 2 until 2026-08-10, then 4, then 5 on 2026-08-28: at 2 nearly everything passed and 77% of journals were never recalled before they decayed; 5 keeps only items useful beyond the session) are dropped and logged, not written. Missing score fails open to 5. This is the first write-time quality gate against journal volume (~1,500/mo before it).
+5. **Near-duplicate gate (2026-08-10)**: the new note's title is embedded and compared against the title vectors of every live journal in the search index. At cosine ≥ `DEDUP_COS` (default 0.82) nothing is written — the matched original gets `strength +1` and `last_recalled = today` instead, so a topic that keeps coming back decays slower rather than piling up copies. Fail-open: without the index or the ML stack the gate is silently off.
+6. Writes each surviving item to a new `.md` with frontmatter:
 
 ```yaml
 ---
@@ -95,7 +96,13 @@ tags: [...]
 <2-6 sentence summary>
 ```
 
-6. On filename collision (same day, same slug) appends `-2`, `-3`, ... — this is the source of the multiple variants you may see in the vault.
+7. On filename collision (same day, same slug) the note is **skipped**, not suffixed (2026-08-03 — the old `-2`, `-3`, … behaviour piled up near-identical files when a running session was summarised again).
+
+Three more rules shape what gets written:
+
+- `<brain-recall>` blocks injected by `brain-recall-inject.py` are stripped from the transcript, so titles the vault already holds are not re-distilled into new journals.
+- **Incremental guard** (2026-08-03): when the payload comes from a `Stop` hook (`hook_event_name: Stop`), the session is skipped unless it grew by `MIN_TURN_DELTA` turns since its last distillation (state in `~/.claude/logs/distill-state.json`). `Stop` fires after every reply, so without this a long session re-summarised itself dozens of times. SessionEnd — the only event this skeleton's installer wires — catchup and hand runs always proceed.
+- The prompt tells the model to write mistakes and patterns as **the rule to follow next time and when it applies** — not who pointed out what. Quoted remarks in internal notes leak into material other people read later (2026-11-01).
 
 ## Recursion guard
 
@@ -110,7 +117,9 @@ The hook sets `CLAUDE_DISTILL_CHILD=1` in the env when invoking `claude -p`, and
 | `CLAUDE_DISTILL_CLAUDE_BIN` | `claude` | claude CLI binary |
 | `CLAUDE_DISTILL_MODEL` | `claude-sonnet-4-6` | Distillation model |
 | `CLAUDE_DISTILL_MIN_TURNS` | `6` | Skip if fewer turns |
-| `CLAUDE_DISTILL_MIN_IMPORTANCE` | `2` | Drop items scored at or below this |
+| `CLAUDE_DISTILL_MIN_IMPORTANCE` | `5` | Drop items scored at or below this |
+| `CLAUDE_DISTILL_DEDUP_COS` | `0.82` | Title-cosine at/above which a note is treated as a re-recording (recall bump instead of write) |
+| `CLAUDE_DISTILL_MIN_TURN_DELTA` | `50` | `Stop`-hook payloads only: skip unless the session grew this many turns since its last distillation (`CLAUDE_DISTILL_FORCE=1` overrides) |
 | `CLAUDE_DISTILL_MAX_TURNS` | `120` | Last N turns included in prompt |
 | `CLAUDE_DISTILL_MAX_CHARS_PER_TURN` | `2000` | Truncate per turn |
 | `CLAUDE_DISTILL_TIMEOUT` | `180` | Seconds for the distill subprocess |
@@ -121,11 +130,10 @@ The pipeline itself is device-local (`~/.claude/hooks/`), not synced. To make
 a fresh device reproducible, this repo carries the full source and an
 installer:
 
-- `_System/hooks/*.py` — tracked source of truth for **all 11** pipeline
-  scripts: `distill-session.py`, `brain-health.py`, `brain-catalog.py`,
-  `brain-reindex.py`, `brain-search.py`, `brain-consolidate.py`,
-  `brain-decay.py`, `brain-sync.py`, `brain-watchdog.py`,
-  `distill-catchup.py`, `_brain_lib.py`. (Until 2026-07-03 only 3 of these
+- `_System/hooks/*.py` — tracked source of truth for **every** pipeline
+  script. Since 2026-09-01 the installer deploys whatever `*.py` sits in that
+  folder instead of a hard-coded list — the list leaked twice, each time a new
+  hook was written and the installer was not updated. (Until 2026-07-03 only 3 of these
   were tracked — a fresh clone could not run search/consolidate/catchup at
   all. See [`health.md`](health.md) §Gap closed. This list said "all 8" until
   2026-07-16, omitting decay/sync/**watchdog** — the one that exists to notice
@@ -151,11 +159,28 @@ The installer:
    and warns loudly if there is none — search/consolidate fail *silently* without it
 2. Copies every `_System/hooks/*.py` → `~/.claude/hooks/` (hash-compare, only touches what changed)
 3. Backs up `~/.claude/settings.json`
-4. Patches **both** hook entries to env-wrapped commands pointed at this brain:
+4. Patches the hook entries to commands pointed at this brain:
    - `SessionEnd` → distill-session (writes Decisions/Mistakes/Patterns)
-   - `SessionStart` → brain-health (pipeline self-check; on Windows this is a
-     generated `brain-health.cmd` launcher with `CLAUDE_DISTILL_VAULT` baked in)
-   (replaces an existing matching command in place; leaves unrelated hooks — e.g. other SessionEnd canaries — alone)
+   - `SessionStart` → brain-health (pipeline self-check; on Windows through the
+     generated `brain-hook-launch.py` launcher with `CLAUDE_DISTILL_VAULT` baked in)
+   - `SessionEnd` → brain-sync `--push` (the shared layer needs both directions)
+   - `SessionEnd` → **the canary**, one line per session end into
+     `~/.claude/logs/sessionend-canary.log` with no Python and no vault in the
+     path, so it survives the failures it exists to witness. `brain-watchdog`
+     needs it as the second leg of "did the hooks fire". macOS/Linux: a plain
+     `sh -c 'date … >> …'`. Windows: `wscript.exe run-hidden.vbs
+     sessionend-canary.cmd` — a bare `cmd` line would flash a console window at
+     every exit, and a `pythonw` entry would re-couple the witness to the
+     interpreter it must outlive (2026-08-13).
+   - `PostToolUse` (matcher `Read|Bash`) → `brain-recall-read.py` — counts a
+     recall only when Claude actually reads a vault `.md` file, once per session
+     ([decay.md §Recall write-back](decay.md)).
+   - `UserPromptSubmit` → `brain-recall-inject.py` — adds the titles and paths
+     (never bodies) of up to 3 relevant notes to each prompt, BM25 only (~0.1 s),
+     behind a keyword-rarity gate and a score floor (`BRAIN_RECALL_SUM_MIN`,
+     default 12). Turn it off with `BRAIN_RECALL_INJECT=0`.
+   (replaces an existing matching command in place — in any block of that event —
+   and leaves unrelated hooks alone)
 5. Pins that interpreter in `~/.claude/hooks/.brain-python`, so a human typing
    `python brain-search.py` self-heals out of whatever venv their shell is in
    (added 2026-07-16; the hard-coded `_PINNED_PYTHONS` list only ever healed the
@@ -212,7 +237,7 @@ Every device runs its own hook against its own brain. No coordination, no sync. 
 
 ## Known issues to be aware of
 
-- **Naming dedup is collision-suffix only**, not similarity-based. Same conceptual decision distilled across two sessions on different days produces two files, not one. Live with it for now; consider a periodic merge job if it becomes noisy.
+- ~~**Naming dedup is collision-suffix only**, not similarity-based.~~ **Fixed 2026-08-10** — see §Per-file behavior step 5 (near-duplicate gate).
 - **Encoding artifacts in old exported files** (Korean mojibake in `_log.md`) appear to be from an even older hook iteration. Don't bring those into brain.
 
 ## 2026-06-11 outage postmortem + hardening
