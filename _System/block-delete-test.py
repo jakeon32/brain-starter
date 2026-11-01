@@ -33,6 +33,9 @@ CASES = [
     ("광범위 rm -rf .", "BLOCK", "rm -rf ."),
     ("앞 세그먼트가 삭제", "BLOCK", "rm Knowledge/a.md; echo done"),
     ("&& 뒤 세그먼트가 삭제", "BLOCK", "cd /tmp && rm Memory/x.md"),
+    ("보호 폴더로 cd 뒤 상대 경로 삭제", "BLOCK", "cd Knowledge && rm x.md"),
+    ("pushd Memory 뒤 삭제", "BLOCK", "pushd Memory; rm -f a.md"),
+    ("보호 경로 변수 뒤 삭제", "BLOCK", "D=Knowledge; rm -rf $D/"),
 
     # 오탐 방지 — 통과해야 한다 (2026-08-08 실측 회귀)
     ("무관한 rm + 다른 곳의 Knowledge 언급", "PASS",
@@ -47,6 +50,8 @@ CASES = [
     ("커밋 메시지에 경로 언급", "PASS",
      "git commit -m 'Knowledge/foo.md 정리'\nrm /tmp/msg.txt"),
     ("삭제 없음", "PASS", "ls -la Knowledge/"),
+    ("보호 폴더에서 나온 뒤 삭제", "PASS", "cd Knowledge && ls; cd /tmp && rm x.txt"),
+    ("다른 폴더로 cd 뒤 삭제", "PASS", "cd /tmp/work && rm -f out.txt"),
 ]
 
 

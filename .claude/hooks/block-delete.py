@@ -69,6 +69,10 @@ BROAD_RE = re.compile(
 # `;` `&&` `||` 개행으로만 나눈다. 파이프는 남긴다 -- 파이프는 데이터가 흐르므로
 # 왼쪽이 오른쪽의 인자다(`ls Knowledge/ | xargs rm` 은 한 덩어리로 봐야 막힌다).
 SEGMENT_RE = re.compile(r';|&&|\|\||\n')
+# 세그먼트 사이로 이어지는 상태: 디렉터리 이동과 변수 대입
+CD_RE = re.compile(r'(^|[\s(])(cd|pushd)(\s|$)')
+CD_PROTECTED_RE = re.compile(r'(cd|pushd)\s+\S*(Knowledge|Memory)([/\\\'"]|\s|$)')
+ASSIGN_RE = re.compile(r'(^|\s)[A-Za-z_][A-Za-z0-9_]*=\S*(Knowledge|Memory)')
 
 MESSAGE = """\
 brain 삭제 방지 -- Knowledge/, Memory/ 는 다른 기기와 공유될 수 있는 내용을 담고 있어 삭제를 막습니다.
@@ -91,10 +95,22 @@ def main() -> int:
     if not cmd or not DEL_RE.search(cmd):
         return 0  # 삭제 계열이 아예 없으면 볼 것도 없다
     # 삭제 명령과 보호 경로가 **같은 세그먼트**에 있을 때만 막는다.
+    # 단, 앞 세그먼트가 보호 폴더로 cd/pushd 했거나 보호 경로를 변수에 담았으면
+    # 그 상태가 뒤 세그먼트까지 이어진다(`cd Knowledge && rm x.md`,
+    # `D=Knowledge; rm -rf $D/`). 그때는 뒤의 상대 경로·변수 삭제도 막는다.
+    entered = False   # 보호 폴더로 들어갔다
+    tainted = False   # 보호 경로를 담은 변수가 있다
     for seg in SEGMENT_RE.split(cmd):
+        if CD_RE.search(seg):
+            entered = bool(CD_PROTECTED_RE.search(seg))
+        if ASSIGN_RE.search(seg):
+            tainted = True
         if not DEL_RE.search(seg):
             continue
         if SCOPE_RE.search(seg) or BROAD_RE.search(seg):
+            print(MESSAGE, file=sys.stderr)
+            return 2
+        if entered or (tainted and "$" in seg):
             print(MESSAGE, file=sys.stderr)
             return 2
     return 0
